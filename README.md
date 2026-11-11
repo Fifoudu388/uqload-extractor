@@ -41,6 +41,39 @@ php uqload.php v80v3zz0vay2
 Codes HTTP : `200` succès, `400` paramètre `id`/`url` manquant ou invalide,
 `502` la page uqload ne répond pas ou le master est introuvable.
 
+## Clés API
+
+Par défaut, l'API est ouverte. Pour la protéger, définis la variable
+`UQLOAD_API_KEYS` (une clé par ligne) :
+
+```
+visionary:sk_live_abc123:60
+test:sk_test_xyz:10
+perso:sk_perso_zzz
+```
+
+Format : `nom:cle[:limite_par_minute]` — la limite est optionnelle (`0` ou
+absente = illimitée). Générer une clé :
+
+```bash
+openssl rand -hex 24
+```
+
+La clé se passe en header `X-API-Key` ou en paramètre `?key=` :
+
+```bash
+curl -H "X-API-Key: sk_live_abc123" "https://ton-app.up.railway.app/uqload.php?id=v80v3zz0vay2"
+curl "https://ton-app.up.railway.app/uqload.php?id=v80v3zz0vay2&key=sk_live_abc123"
+```
+
+- Sans clé (ou clé fausse) quand des clés sont configurées : `401`.
+- Limite atteinte : `429` avec `Retry-After` (en secondes) et les headers
+  `X-RateLimit-Limit` / `X-RateLimit-Remaining` sur chaque réponse.
+- La réponse inclut `key_name` (le nom de la clé utilisée).
+- Chaque clé a son propre compteur (fenêtre fixe de 60 s, par clé).
+- Pour révoquer une clé, retire sa ligne de la variable et redéploie
+  (Railway redémarre le service quand une variable change).
+
 ## Améliorations par rapport à la v1
 
 - **dePacker corrigé** : la base 62 est supportée (`base_convert()` plafonnait à 36,
@@ -81,6 +114,7 @@ PHP 8.0+ requis, extension `curl` activée.
 | Variable | Défaut | Description |
 |---|---|---|
 | `UQLOAD_CACHE_TTL` | `3600` | Durée du cache en secondes (`0` = désactivé) |
+| `UQLOAD_API_KEYS` | _(vide)_ | Clés API, une par ligne : `nom:cle[:limite_par_minute]`. Vide = accès libre |
 
 ## Notes
 

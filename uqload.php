@@ -15,9 +15,16 @@
  *   playlistHttp : code HTTP de la playlist master
  *   masterBody   : contenu brut du master .m3u8
  *   cached       : true si la reponse vient du cache
+ *   key_name     : nom de la cle API utilisee (si cles configurees)
  *
  * Variables d'environnement :
  *   UQLOAD_CACHE_TTL : duree du cache en secondes (defaut 3600, 0 = desactive)
+ *   UQLOAD_API_KEYS  : cles API, une par ligne, format nom:cle[:limite_par_minute]
+ *                      ex : visionary:sk_live_abc123:60
+ *                           test:sk_test_xyz:10
+ *                      Si vide : acces libre. Si defini : cle requise
+ *                      (header X-API-Key ou ?key=), 401 sinon, 429 si limite atteinte.
+ *                      Generer une cle : openssl rand -hex 24
  *
  * PHP 8.0+ requis (str_starts_with, fonctions flechees).
  */
@@ -303,9 +310,126 @@ function sendJson(array $data, int $code = 200): void
     echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), PHP_EOL;
 }
 
+/**
+ * Cles API configurees via UQLOAD_API_KEYS, une par ligne :
+ *   nom:cle[:limite_par_minute]   (limite 0 ou absente = illimite)
+ * Retourne [] si aucune cle n'est configuree (acces libre).
+ */
+function parseApiKeys(): array
+{
+    $raw = getenv('UQLOAD_API_KEYS');
+    if ($raw === false || trim($raw) === '') {
+        return [];
+    }
+    $keys = [];
+    foreach (preg_split("/[\r\n,]+/", $raw) ?: [] as $line) {
+        $line = trim((string) $line);
+        if ($line === '' || str_starts_with($line, '#')) {
+            continue;
+        }
+        $parts = explode(':', $line, 3);
+        if (count($parts) < 2 || $parts[0] === '' || $parts[1] === '') {
+            continue;
+        }
+        $keys[] = [
+            'name'  => $parts[0],
+            'key'   => $parts[1],
+            'limit' => isset($parts[2]) && $parts[2] !== '' ? max(0, (int) $parts[2]) : 0,
+        ];
+    }
+    return $keys;
+}
+
+/**
+ * Authentifie la requete : header X-API-Key ou parametre ?key=.
+ * Retourne la config de la cle trouvee, ['open' => true] si aucune cle
+ * n'est configuree (acces libre), ou null si la cle est absente/invalide.
+ */
+function findApiKey(array $configuredKeys): ?array
+{
+    if ($configuredKeys === []) {
+        return ['open' => true];
+    }
+    $provided = $_SERVER['HTTP_X_API_KEY'] ?? null;
+    if (!is_string($provided) || $provided === '') {
+        $provided = $_GET['key'] ?? null;
+    }
+    if (!is_string($provided) || $provided === '') {
+        return null;
+    }
+    foreach ($configuredKeys as $cfg) {
+        if (hash_equals($cfg['key'], $provided)) {
+            return $cfg;
+        }
+    }
+    return null;
+}
+
+/**
+ * Rate limit par cle : fenetre fixe de 60 s, compteur en fichier (avec verrou).
+ * Retourne ['allowed' => bool, 'limit' => int, 'remaining' => int, 'retry_after' => int].
+ */
+function checkRateLimit(array $keyCfg): array
+{
+    $limit = (int) ($keyCfg['limit'] ?? 0);
+    if ($limit <= 0) {
+        return ['allowed' => true, 'limit' => 0, 'remaining' => -1, 'retry_after' => 0];
+    }
+    $file = sys_get_temp_dir() . '/uqload-rl-' . md5($keyCfg['key']) . '.json';
+    $fp   = fopen($file, 'c+');
+    if ($fp === false) {
+        return ['allowed' => true, 'limit' => $limit, 'remaining' => $limit, 'retry_after' => 0];
+    }
+    flock($fp, LOCK_EX);
+    $now  = time();
+    $data = ['window' => $now, 'count' => 0];
+    $raw  = stream_get_contents($fp);
+    if ($raw !== false && $raw !== '') {
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded) && isset($decoded['window'], $decoded['count'])) {
+            $data = $decoded;
+        }
+    }
+    if ($now - (int) $data['window'] >= 60) {
+        $data = ['window' => $now, 'count' => 0];
+    }
+    $allowed = (int) $data['count'] < $limit;
+    if ($allowed) {
+        $data['count']++;
+        ftruncate($fp, 0);
+        rewind($fp);
+        fwrite($fp, json_encode($data));
+    }
+    $remaining  = max(0, $limit - (int) $data['count']);
+    $retryAfter = $allowed ? 0 : max(1, 60 - ($now - (int) $data['window']));
+    flock($fp, LOCK_UN);
+    fclose($fp);
+    return ['allowed' => $allowed, 'limit' => $limit, 'remaining' => $remaining, 'retry_after' => $retryAfter];
+}
+
 // ---- Entree
 $input = $argv[1] ?? ($_GET['id'] ?? null);
 $url   = $argv[2] ?? ($_GET['url'] ?? null);
+
+// ---- Authentification par cle API (si des cles sont configurees, sauf en CLI)
+$apiKeys = parseApiKeys();
+$auth    = (php_sapi_name() === 'cli') ? ['open' => true] : findApiKey($apiKeys);
+if ($apiKeys !== [] && $auth === null) {
+    sendJson(['error' => 'API key manquante ou invalide (header X-API-Key ou ?key=)'], 401);
+    exit;
+}
+if ($auth !== null && empty($auth['open'])) {
+    $rl = checkRateLimit($auth);
+    if ($rl['limit'] > 0) {
+        header('X-RateLimit-Limit: ' . $rl['limit']);
+        header('X-RateLimit-Remaining: ' . $rl['remaining']);
+    }
+    if (!$rl['allowed']) {
+        header('Retry-After: ' . $rl['retry_after']);
+        sendJson(['error' => 'rate limit atteint pour cette cle', 'retry_after' => $rl['retry_after']], 429);
+        exit;
+    }
+}
 
 $pageUrl = buildPageUrl(is_string($input) ? $input : null, is_string($url) ? $url : null);
 if ($pageUrl === null) {
@@ -320,6 +444,9 @@ $cacheKey = md5($pageUrl);
 $cached = cacheGet($cacheKey, $cacheTtl);
 if ($cached !== null) {
     $cached['cached'] = true;
+    if ($auth !== null && !empty($auth['name'])) {
+        $cached['key_name'] = $auth['name'];
+    }
     sendJson($cached);
     exit;
 }
@@ -347,4 +474,7 @@ if ($pl['code'] === 200 && $pl['body'] !== '') {
 
 cacheSet($cacheKey, $res, $cacheTtl);
 $res['cached'] = false;
+if ($auth !== null && !empty($auth['name'])) {
+    $res['key_name'] = $auth['name'];
+}
 sendJson($res);
