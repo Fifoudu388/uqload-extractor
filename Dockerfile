@@ -8,7 +8,7 @@ COPY . /app
 
 # Verifie la syntaxe PHP au build : une erreur ici fait echouer le
 # deploiement Railway tout de suite, avec le message d'erreur en clair.
-RUN php -l uqload.php && php -l index.php
+RUN php -l uqload.php && php -l vidmoly.php && php -l index.php
 
 # Railway injecte $PORT : le serveur integre de PHP ecoute dessus.
 CMD ["sh", "-c", "php -S 0.0.0.0:${PORT:-8080} -t /app"]

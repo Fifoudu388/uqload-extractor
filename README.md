@@ -1,20 +1,33 @@
-# uqload — extracteur m3u8
+# uqload + vidmoly — extracteurs vidéo
 
-Extrait l'URL du master `.m3u8` (et toutes ses variantes de qualité) d'une page
-[_uqload_](https://uqload.vc) : le token est régénéré à chaque chargement de page
-(valide ~4h) et se trouve dans un script obfusqué par le packer « Dean Edwards ».
+Extrait l'URL du flux direct (`.m3u8` HLS, avec toutes ses variantes de qualité)
+d'une page [_uqload_](https://uqload.vc) ou [_vidmoly_](https://vidmoly.me).
+
+- **uqload** : le token est régénéré à chaque chargement de page (valide ~4h)
+  et se trouve dans un script obfusqué par le packer « Dean Edwards ».
+- **vidmoly** : la page `/v/<id>` contient une iframe vers la page
+  d'intégration (`/embed-<id>.html`, domaine `vidmoly.biz`), dont le lecteur
+  JW Player embarque le `file: ...master.m3u8...` dans le HTML. Le formulaire
+  de vérification éventuel (« Select number ») est soumis automatiquement.
 
 ## Utilisation
 
 ```
-# Par code vidéo
+# uqload — par code vidéo
 GET /uqload.php?id=v80v3zz0vay2
 
-# Par URL complète
+# uqload — par URL complète
 GET /uqload.php?url=https://uqload.vc/v80v3zz0vay2.html
+
+# vidmoly — par code vidéo
+GET /vidmoly.php?id=iztl71ko757x
+
+# vidmoly — par URL complète (/v/ ou /embed-...html, domaines .me/.to/.net/.biz)
+GET /vidmoly.php?url=https://vidmoly.me/v/iztl71ko757x
 
 # En CLI
 php uqload.php v80v3zz0vay2
+php vidmoly.php iztl71ko757x
 ```
 
 ## Réponse JSON
@@ -37,14 +50,19 @@ php uqload.php v80v3zz0vay2
 - `variants` : toutes les qualités du master, triées par bande passante décroissante.
 - `best` / `media` : URL de la meilleure variante (ou du master s'il n'y a pas de variantes).
 - `cached` : `true` si la réponse vient du cache (durée par défaut : 1h).
+- `type` (vidmoly) : `"m3u8"` ou `"mp4"` selon le flux trouvé.
+- `subtitles` (vidmoly) : sous-titres embarqués `[{file, label, kind}]`, si présents.
+- `embed` (vidmoly) : URL de la page d'intégration utilisée.
 
 Codes HTTP : `200` succès, `400` paramètre `id`/`url` manquant ou invalide,
-`502` la page uqload ne répond pas ou le master est introuvable.
+`401` clé API manquante/invalide (si des clés sont configurées), `429` rate
+limit atteint, `502` la page ne répond pas ou le flux est introuvable.
 
 ## Clés API
 
 Par défaut, l'API est ouverte. Pour la protéger, définis la variable
-`UQLOAD_API_KEYS` (une clé par ligne) :
+`UQLOAD_API_KEYS` (une clé par ligne) — **la même variable protège les deux
+extracteurs** (`uqload.php` et `vidmoly.php`) :
 
 ```
 visionary:sk_live_abc123:60
@@ -106,6 +124,7 @@ PHP 8.0+ requis, extension `curl` activée.
    → choisis le dépôt. Railway détecte le `Dockerfile` et `railway.toml` tout seul.
 3. Dans **Settings → Networking → Generate Domain** pour avoir l'URL publique.
 4. Teste : `https://ton-app.up.railway.app/uqload.php?id=v80v3zz0vay2`
+   et `https://ton-app.up.railway.app/vidmoly.php?id=iztl71ko757x`
 
 `PORT` est injecté automatiquement par Railway, rien à configurer.
 
