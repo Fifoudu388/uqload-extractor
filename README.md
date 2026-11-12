@@ -10,6 +10,17 @@ d'une page [_uqload_](https://uqload.vc) ou [_vidmoly_](https://vidmoly.me).
   JW Player embarque le `file: ...master.m3u8...` dans le HTML. Le formulaire
   de vérification éventuel (« Select number ») est soumis automatiquement.
 
+## Version JavaScript (Node.js)
+
+La **même chose en JavaScript** existe dans le dossier [`js/`](js/) : Node.js 18+,
+**sans aucune dépendance**, même comportement, mêmes routes (`/uqload`,
+`/vidmoly` — avec les alias `/uqload.php` et `/vidmoly.php` pour rester
+compatible avec cette version PHP), mêmes variables d'environnement
+(`UQLOAD_CACHE_TTL`, `UQLOAD_API_KEYS`), même proxy de flux (`?proxy=1`,
+`?stream=`). Voir [`js/README.md`](js/README.md) pour l'utilisation, les
+tests (`node test/selftest.mjs`, `LIVE=1` pour le test live) et le déploiement
+sur Railway (deuxième service, même dépôt, **Dockerfile Path : `js/Dockerfile`**).
+
 ## Utilisation
 
 ```

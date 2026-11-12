@@ -1,0 +1,1 @@
+{"description":"Extracteurs vidéo uqload + vidmoly — version Node.js (sans dépendances)","engines":{"node":">=18"},"license":"MIT","main":"server.js","name":"uqload-vidmoly-js","scripts":{"start":"node server.js","test":"node test/selftest.mjs"},"type":"module","version":"1.0.0"}

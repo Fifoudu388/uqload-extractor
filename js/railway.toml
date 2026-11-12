@@ -1,0 +1,13 @@
+# Config Railway pour la version Node.js (service séparé du service PHP).
+# Dans Railway : New Service -> Deploy from GitHub repo (même dépôt), puis
+# dans Settings, définir "Dockerfile Path" sur js/Dockerfile et
+# "Config File Path" sur js/railway.toml (ou laisser railway.toml à la racine).
+[build]
+builder = "dockerfile"
+dockerfilePath = "js/Dockerfile"
+
+[deploy]
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
