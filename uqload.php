@@ -3,7 +3,17 @@
  * Extracteur m3u8 uqload — v2
  * ==========================
  * Usage web  : uqload.php?id=v80v3zz0vay2   (ou ?url=https://uqload.vc/xxxx.html)
+ *              uqload.php?id=v80v3zz0vay2&proxy=1   -> URLs media via le proxy (voir ci-dessous)
+ *              uqload.php?stream=<url encodee>      -> relaye un flux .m3u8 ou un segment
  * Usage CLI  : php uqload.php v80v3zz0vay2
+ *
+ * Referer / Origin : uqload refuse les requetes dont le Referer/Origin n'est pas
+ * uqload. Cote serveur, toutes les requetes partent donc avec Referer: et
+ * Origin: uqload. Mais un navigateur ne peut pas falsifier ces headers
+ * (headers interdits en JS) : quand le lecteur recupere le .m3u8 ou les segments
+ * directement, uqload peut repondre 403. Le mode proxy evite ca : le lecteur ne
+ * parle qu'a ce serveur, qui refait les requetes vers uqload avec les bons
+ * headers (et transmet le Range pour le seek).
  *
  * Le token est regenere a chaque chargement de page (valide ~4h) et n'est PAS lie a l'IP.
  * Il est present dans le HTML, dans un script obfusque par le packer "Dean Edwards".
@@ -12,6 +22,7 @@
  *   master       : URL du master .m3u8
  *   variants     : [{bandwidth, resolution, url}] tries par qualite decroissante
  *   best / media : URL de la meilleure variante (ou du master si pas de variantes)
+ *   proxied      : true si les URLs passent par le proxy (?proxy=1)
  *   playlistHttp : code HTTP de la playlist master
  *   masterBody   : contenu brut du master .m3u8
  *   cached       : true si la reponse vient du cache
@@ -172,6 +183,189 @@ function resolveUrl(string $base, string $rel): string
     return "{$scheme}://{$host}{$port}{$dir}{$rel}";
 }
 
+/**
+ * Domaine uqload de base d'un hote (ex : 'uqload.vc' pour 'strm1.uqload.vc',
+ * 'www.uqload.vc' ou 'uqload.vc'), null si ce n'est pas un domaine uqload.
+ */
+function uqloadBaseDomain(string $host): ?string
+{
+    if (preg_match('/^(?:[a-z0-9-]+\.)*uqload\.(vc|io|net|com|to)$/', strtolower($host), $m)) {
+        return 'uqload.' . $m[1];
+    }
+    return null;
+}
+
+/** Origine uqload (domaine de base) a utiliser en Referer/Origin pour une URL. */
+function uqloadSiteOrigin(string $url): string
+{
+    $host = parse_url($url, PHP_URL_HOST);
+    if (!is_string($host) || $host === '') {
+        return 'uqload.vc';
+    }
+    return uqloadBaseDomain($host) ?? 'uqload.vc';
+}
+
+/** URL absolue du script courant pour atteindre le mode proxy (?stream=...). */
+function proxyUrl(string $target): string
+{
+    $proto = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null;
+    if (!is_string($proto) || $proto === '') {
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    }
+    $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $script = $_SERVER['SCRIPT_NAME'] ?? '/uqload.php';
+    return "{$proto}://{$host}{$script}?stream=" . rawurlencode($target);
+}
+
+/**
+ * Re-ecrit une playlist .m3u8 : chaque URI (segment ou variante) et chaque
+ * URI="..." (ex : cle EXT-X-KEY) passe par le proxy.
+ */
+function rewritePlaylist(string $body, string $baseUrl): string
+{
+    $out = [];
+    foreach (preg_split("/\r\n|\n|\r/", $body) ?: [] as $line) {
+        $trim = trim((string) $line);
+        if ($trim === '') {
+            $out[] = '';
+            continue;
+        }
+        if (str_starts_with($trim, '#')) {
+            if (str_contains($trim, 'URI="')) {
+                $trim = preg_replace_callback(
+                    '/URI="([^"]+)"/',
+                    static fn($m) => 'URI="' . proxyUrl(resolveUrl($baseUrl, $m[1])) . '"',
+                    $trim
+                ) ?? $trim;
+            }
+            $out[] = $trim;
+            continue;
+        }
+        $out[] = proxyUrl(resolveUrl($baseUrl, $trim));
+    }
+    return implode("\n", $out) . "\n";
+}
+
+/**
+ * Re-ecrit les URLs media d'une reponse JSON en URLs de proxy (?stream=...).
+ * Les URLs directes restent dans le cache ; la re-ecriture se fait a l'envoi.
+ */
+function applyProxyMode(array $res): array
+{
+    $origMaster = $res['master'] ?? null;
+    if (is_string($origMaster) && $origMaster !== '') {
+        $res['master'] = proxyUrl($origMaster);
+    }
+    if (isset($res['variants']) && is_array($res['variants'])) {
+        foreach ($res['variants'] as &$v) {
+            if (isset($v['url']) && is_string($v['url'])) {
+                $v['url'] = proxyUrl($v['url']);
+            }
+        }
+        unset($v);
+    }
+    if (isset($res['best']) && is_string($res['best'])) {
+        $res['best'] = proxyUrl($res['best']);
+    }
+    if (isset($res['media']) && is_string($res['media'])) {
+        $res['media'] = proxyUrl($res['media']);
+    }
+    if (isset($res['masterBody']) && is_string($origMaster) && $origMaster !== '') {
+        $res['masterBody'] = rewritePlaylist($res['masterBody'], $origMaster);
+    }
+    $res['proxied'] = true;
+    return $res;
+}
+
+/**
+ * GET avec en-tetes de reponse captures (pour relayer statut et headers).
+ * $range : valeur brute de l'en-tete Range du client (ex : "bytes=0-1023").
+ */
+function httpFetch(string $url, array $headers = [], ?string $range = null, int $timeout = 25): array
+{
+    $respHeaders = [];
+    $allHeaders  = array_merge(['Accept: */*'], $headers);
+    if ($range !== null && $range !== '') {
+        $allHeaders[] = 'Range: ' . $range;
+    }
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 5,
+        CURLOPT_USERAGENT      => UA,
+        CURLOPT_HTTPHEADER     => $allHeaders,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_ENCODING       => '',
+        CURLOPT_HEADERFUNCTION => static function ($ch, $header) use (&$respHeaders) {
+            $len = strlen($header);
+            $parts = explode(':', $header, 2);
+            if (count($parts) === 2) {
+                $respHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+            }
+            return $len;
+        },
+    ]);
+    $body = curl_exec($ch);
+    $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+    return ['code' => $code, 'body' => $body === false ? '' : (string) $body, 'error' => $err, 'headers' => $respHeaders];
+}
+
+/**
+ * Mode proxy de flux : recupere un .m3u8 ou un segment cote serveur avec
+ * Referer/Origin uqload, puis le sert au client.
+ * - playlist .m3u8 : les URLs sont re-ecrites vers ?stream= (le lecteur ne
+ *   touche jamais uqload directement)
+ * - segment : le Range du client est transmis (seek), statut 200/206 et
+ *   headers utiles relayes
+ * Securite : seuls les domaines uqload sont autorises (anti-SSRF) et la cle
+ * API (si configuree) est exigee en amont comme pour l'extraction.
+ */
+function serveStream(string $target): void
+{
+    $parts = parse_url($target);
+    if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])
+        || !in_array(strtolower($parts['scheme']), ['http', 'https'], true)
+        || uqloadBaseDomain($parts['host']) === null) {
+        sendJson(['error' => 'URL de flux invalide (domaines uqload uniquement)'], 400);
+        return;
+    }
+    $origin = uqloadSiteOrigin($target);
+    $path   = parse_url($target, PHP_URL_PATH) ?? '';
+    $range  = $_SERVER['HTTP_RANGE'] ?? null;
+    $range  = is_string($range) ? $range : null;
+    if (str_ends_with(strtolower($path), '.m3u8')) {
+        $range = null; // une playlist se recupere entiere, pas par morceaux
+    }
+    $res = httpFetch($target, ["Referer: https://{$origin}/", "Origin: https://{$origin}"], $range);
+    if ($res['code'] < 200 || $res['code'] >= 400 || $res['body'] === '') {
+        sendJson(['error' => "flux HTTP {$res['code']} {$res['error']}"], 502);
+        return;
+    }
+    $ctype = strtolower($res['headers']['content-type'] ?? '');
+    $isPlaylist = str_ends_with(strtolower($path), '.m3u8') || str_contains($ctype, 'mpegurl');
+    if ($isPlaylist) {
+        header('Content-Type: application/vnd.apple.mpegurl; charset=utf-8');
+        header('Cache-Control: no-cache');
+        echo rewritePlaylist($res['body'], $target);
+        return;
+    }
+    http_response_code($res['code']);
+    if ($ctype !== '') {
+        header('Content-Type: ' . $res['headers']['content-type']);
+    }
+    foreach (['content-range', 'accept-ranges', 'content-length'] as $h) {
+        if (isset($res['headers'][$h])) {
+            header(ucwords($h, '-') . ': ' . $res['headers'][$h]);
+        }
+    }
+    header('Cache-Control: public, max-age=3600');
+    echo $res['body'];
+}
+
 /** Cherche l'URL du master .m3u8 dans le HTML (de-obfusque puis brut). */
 function findMasterUrl(string $html): ?string
 {
@@ -207,7 +401,9 @@ function findMasterUrl(string $html): ?string
 
 function extractMaster(string $pageUrl): array
 {
-    $page = httpGet($pageUrl, ['Accept: text/html,application/xhtml+xml', 'Referer: https://uqload.vc/']);
+    // Referer + Origin uqload (derives du domaine de la page : .vc/.io/.com/.to).
+    $origin = uqloadSiteOrigin($pageUrl);
+    $page   = httpGet($pageUrl, ['Accept: text/html,application/xhtml+xml', "Referer: https://{$origin}/", "Origin: https://{$origin}"]);
     if ($page['code'] !== 200 || $page['body'] === '') {
         return ['error' => "page HTTP {$page['code']} {$page['error']}"];
     }
@@ -431,6 +627,18 @@ if ($auth !== null && empty($auth['open'])) {
     }
 }
 
+// ---- Mode proxy de flux : ?stream=<url encodee> (web uniquement).
+// Le lecteur ne contacte jamais uqload directement : c'est ce serveur qui
+// refait la requete avec Referer/Origin uqload (et gere le Range pour le seek).
+$stream = $_GET['stream'] ?? null;
+if (is_string($stream) && $stream !== '' && php_sapi_name() !== 'cli') {
+    serveStream($stream);
+    exit;
+}
+
+// ---- Mode proxy JSON : ?proxy=1 -> les URLs media de la reponse passent par ?stream=
+$proxyMode = isset($_GET['proxy']) && $_GET['proxy'] !== '' && $_GET['proxy'] !== '0' && php_sapi_name() !== 'cli';
+
 $pageUrl = buildPageUrl(is_string($input) ? $input : null, is_string($url) ? $url : null);
 if ($pageUrl === null) {
     sendJson(['error' => 'param ?id= (code video uqload) ou ?url= (lien uqload.vc) requis/valide'], 400);
@@ -447,6 +655,9 @@ if ($cached !== null) {
     if ($auth !== null && !empty($auth['name'])) {
         $cached['key_name'] = $auth['name'];
     }
+    if ($proxyMode) {
+        $cached = applyProxyMode($cached);
+    }
     sendJson($cached);
     exit;
 }
@@ -457,7 +668,7 @@ if (!isset($res['master'])) {
     exit;
 }
 
-$pl = httpGet($res['master'], ['Accept: application/vnd.apple.mpegurl', "Referer: {$pageUrl}"]);
+$pl = httpGet($res['master'], ['Accept: application/vnd.apple.mpegurl', "Referer: {$pageUrl}", 'Origin: https://' . uqloadSiteOrigin($res['master'])]);
 $res['playlistHttp'] = $pl['code'];
 if ($pl['code'] === 200 && $pl['body'] !== '') {
     $variants = parseMasterPlaylist($pl['body'], $res['master']);
@@ -476,5 +687,8 @@ cacheSet($cacheKey, $res, $cacheTtl);
 $res['cached'] = false;
 if ($auth !== null && !empty($auth['name'])) {
     $res['key_name'] = $auth['name'];
+}
+if ($proxyMode) {
+    $res = applyProxyMode($res);
 }
 sendJson($res);

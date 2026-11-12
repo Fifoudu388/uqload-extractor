@@ -19,6 +19,10 @@ GET /uqload.php?id=v80v3zz0vay2
 # uqload — par URL complète
 GET /uqload.php?url=https://uqload.vc/v80v3zz0vay2.html
 
+# uqload — via le proxy (flux relayé par le serveur, voir ci-dessous)
+GET /uqload.php?id=v80v3zz0vay2&proxy=1
+GET /uqload.php?stream=https%3A%2F%2Fstrm1.uqload.vc%2F...%2Fmaster.m3u8
+
 # vidmoly — par code vidéo
 GET /vidmoly.php?id=iztl71ko757x
 
@@ -57,6 +61,39 @@ php vidmoly.php iztl71ko757x
 Codes HTTP : `200` succès, `400` paramètre `id`/`url` manquant ou invalide,
 `401` clé API manquante/invalide (si des clés sont configurées), `429` rate
 limit atteint, `502` la page ne répond pas ou le flux est introuvable.
+
+## Referer / Origin et proxy de flux
+
+uqload refuse les requêtes dont le `Referer` ou l'`Origin` n'est pas uqload :
+- Côté serveur, toutes les requêtes partent avec `Referer: https://uqload.xx/`
+  et `Origin: https://uqload.xx` (domaine dérivé de la page : `.vc`, `.io`,
+  `.com`, `.to`).
+- Mais un navigateur ne peut pas falsifier ces en-têtes (en-têtes interdits en
+  JavaScript) : si ton lecteur (hls.js, `<video>`, VLC…) récupère le `.m3u8`
+  ou les segments directement, uqload peut répondre `403`.
+
+Solution : faire passer le flux par le serveur avec `?proxy=1` :
+
+```
+GET /uqload.php?id=v80v3zz0vay2&proxy=1
+```
+
+La réponse JSON renvoie alors les URLs des médias via le proxy (`?stream=...`,
+champ `"proxied": true`). Le lecteur ne parle qu'à ton serveur, qui refait
+chaque requête vers uqload avec les bons en-têtes. Les playlists `.m3u8` sont
+réécrites pour que les segments passent aussi par le proxy, et l'en-tête
+`Range` est transmis (le seek fonctionne, réponse `206`).
+
+Tu peux aussi appeler le proxy directement :
+
+```
+GET /uqload.php?stream=https%3A%2F%2Fstrm1.uqload.vc%2F...%2Fmaster.m3u8
+```
+
+- Seuls les domaines uqload sont autorisés (`?stream=` ne sert pas de proxy
+  ouvert).
+- La clé API (si configurée) est exigée aussi sur `?stream=` et `?proxy=1`.
+- Le proxy ne met pas les segments en cache (ils sont relayés à la demande).
 
 ## Clés API
 
@@ -103,8 +140,11 @@ curl "https://ton-app.up.railway.app/uqload.php?id=v80v3zz0vay2&key=sk_live_abc1
   de ne renvoyer que la première URL `.m3u8` trouvée.
 - **Sécurité** : `?url=` n'accepte que les domaines uqload (anti-SSRF),
   `?id=` est validé (alphanumérique, 3–64 caractères).
-- **Robustesse** : `Referer` envoyé sur la playlist, timeout de connexion,
-  codes HTTP cohérents, en-tête CORS (appelable depuis un lecteur web).
+- **Robustesse** : `Referer` et `Origin` uqload envoyés sur la page et sur la
+  playlist (domaine dérivé de l'URL : `.vc`, `.io`, `.com`, `.to`), timeout de
+  connexion, codes HTTP cohérents, en-tête CORS (appelable depuis un lecteur
+  web). **Proxy de flux** (`?proxy=1` et `?stream=`) pour contourner le
+  contrôle Referer/Origin d'uqload côté lecteur (voir la section ci-dessus).
 - **Cache** : résultats mis en cache 1h (fichier, `UQLOAD_CACHE_TTL` pour régler,
   `0` pour désactiver).
 
