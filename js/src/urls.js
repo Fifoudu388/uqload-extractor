@@ -31,3 +31,18 @@ export function uqloadSiteOrigin(url) {
   }
   return uqloadBaseDomain(host) ?? 'uqload.vc';
 }
+
+/**
+ * Hôte autorisé pour le relais de flux vidmoly (?stream=) :
+ * - un domaine vidmoly (me/to/net/biz, avec sous-domaines) ;
+ * - le CDN qui héberge les flux : *.vmpx.online (ex : prx-1331-ant-q.vmpx.online).
+ * Les URLs de flux vidmoly sont liées à l'IP qui a chargé la page
+ * (token ?t=...&asn=...) : seul le serveur (IP fixe) peut les récupérer,
+ * d'où le passage obligé par le proxy.
+ */
+export function vidmolyMediaHostAllowed(host) {
+  const h = host.toLowerCase();
+  if (/^(?:[a-z0-9-]+\.)*vidmoly\.(me|to|net|biz)$/.test(h)) return true;
+  if (/^(?:[a-z0-9-]+\.)*vmpx\.online$/.test(h)) return true;
+  return false;
+}

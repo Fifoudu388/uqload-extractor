@@ -9,7 +9,9 @@ import { dirname, join } from 'node:path';
 import { dePacker, baseEncode } from '../src/depacker.js';
 import { parseMasterPlaylist, rewritePlaylist } from '../src/m3u8.js';
 import { applyProxyMode, extractUqload, findMasterUrl } from '../src/uqload.js';
-import { findStreamUrl, findSubtitles } from '../src/vidmoly.js';
+import { findStreamUrl, findSubtitles, extractVidmoly } from '../src/vidmoly.js';
+import { vidmolyMediaHostAllowed } from '../src/urls.js';
+import { serveStream } from '../src/proxy.js';
 
 const JS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIVE = process.env.LIVE === '1';
@@ -23,6 +25,7 @@ function ok(name, fn) {
 }
 
 const fakeProxy = (u) => 'https://srv/uqload?stream=' + encodeURIComponent(u);
+const fakeVidmolyProxy = (u) => 'https://srv/vidmoly?stream=' + encodeURIComponent(u);
 
 // ---------- Unitaires ----------
 console.log('Unitaires :');
@@ -126,6 +129,35 @@ await ok('findStreamUrl / findSubtitles (vidmoly)', () => {
   assert.equal(subs[0].label, 'Français');
 });
 
+await ok('vidmolyMediaHostAllowed (vidmoly + CDN vmpx.online)', () => {
+  for (const h of ['vidmoly.me', 'www.vidmoly.biz', 'sub.vidmoly.to', 'vidmoly.net']) {
+    assert.equal(vidmolyMediaHostAllowed(h), true, h);
+  }
+  for (const h of ['prx-1331-ant-q.vmpx.online', 'vmpx.online', 'cdn.vmpx.online']) {
+    assert.equal(vidmolyMediaHostAllowed(h), true, h);
+  }
+  for (const h of ['uqload.vc', 'evil.example.com', 'vmpx.online.evil.com', 'notvidmoly.me']) {
+    assert.equal(vidmolyMediaHostAllowed(h), false, h);
+  }
+});
+
+await ok('applyProxyMode (vidmoly : sous-titres + masterBody)', () => {
+  const res = {
+    master: 'https://prx-1.vmpx.online/x/master.m3u8?t=abc',
+    variants: [{ bandwidth: 100, resolution: '640x360', url: 'https://prx-1.vmpx.online/x/360.m3u8' }],
+    best: 'https://prx-1.vmpx.online/x/360.m3u8',
+    media: 'https://prx-1.vmpx.online/x/360.m3u8',
+    subtitles: [{ file: 'https://prx-1.vmpx.online/subs/fr.vtt', label: 'Français', kind: 'captions' }],
+    masterBody: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100\n360.m3u8\n',
+  };
+  applyProxyMode(res, fakeVidmolyProxy);
+  assert.equal(res.proxied, true);
+  assert.ok(res.master.startsWith('https://srv/vidmoly?stream='));
+  assert.ok(res.best.startsWith('https://srv/vidmoly?stream='));
+  assert.ok(res.subtitles[0].file.startsWith('https://srv/vidmoly?stream='));
+  assert.match(res.masterBody, /stream=https%3A%2F%2Fprx-1\.vmpx\.online%2Fx%2F360\.m3u8/);
+});
+
 // ---------- Intégration (serveur simulé) ----------
 console.log('Intégration (serveur simulé) :');
 await ok('extractUqload contre un serveur simulé (page packée + master)', async () => {
@@ -167,6 +199,103 @@ await ok('extractUqload contre un serveur simulé (page packée + master)', asyn
     assert.equal(res.best, `${host}/720.m3u8`);
     assert.equal(res.media, `${host}/720.m3u8`);
     assert.match(res.masterBody, /#EXT-X-STREAM-INF/);
+  } finally {
+    server.close();
+  }
+});
+
+await ok('extractVidmoly + serveStream vidmoly contre un serveur simulé (proxy + Range)', async () => {
+  // Réponse simulée (statut + headers + corps) pour appeler serveStream sans HTTP.
+  const mockRes = () => {
+    const r = { statusCode: 200, headers: {}, body: Buffer.alloc(0) };
+    r.writeHead = (code, headers) => {
+      r.statusCode = code;
+      for (const [k, v] of Object.entries(headers ?? {})) r.headers[k.toLowerCase()] = v;
+    };
+    r.setHeader = (name, value) => { r.headers[name.toLowerCase()] = value; };
+    r.end = (body) => { r.body = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? '')); };
+    return r;
+  };
+  const vidmolyOpts = {
+    allowedHost: () => true, // localhost simulé (en prod : vidmolyMediaHostAllowed)
+    referer: 'https://vidmoly.me/',
+    origin: 'vidmoly.me',
+    label: 'vidmoly',
+  };
+  const routes = new Map();
+  const server = http.createServer((req, res) => {
+    const body = routes.get(req.url.split('?')[0]);
+    if (body === undefined) { res.writeHead(404); res.end(); return; }
+    const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    const range = req.headers.range;
+    if (range) {
+      const m = /bytes=(\d+)-(\d*)/.exec(range);
+      if (m) {
+        const start = parseInt(m[1], 10);
+        const end = m[2] === '' ? buf.length - 1 : Math.min(parseInt(m[2], 10), buf.length - 1);
+        res.writeHead(206, {
+          'Content-Type': 'video/mp2t',
+          'Content-Range': `bytes ${start}-${end}/${buf.length}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(end - start + 1),
+        });
+        res.end(buf.subarray(start, end + 1));
+        return;
+      }
+    }
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end(buf);
+  });
+  await new Promise((resolve) => server.listen(0, 'localhost', resolve));
+  const port = server.address().port;
+  const host = `http://localhost:${port}`;
+  try {
+    routes.set('/v/iztl71ko757x',
+      `<html><body><script>jwplayer("p").setup({ sources: [{file: "${host}/master.m3u8?t=abc"}],
+        tracks: [{file: "${host}/subs/fr.vtt", label: "Français", kind: "captions"}] });</script></body></html>`);
+    routes.set('/master.m3u8', [
+      '#EXTM3U',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480',
+      '480.m3u8',
+      '#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720',
+      '720.m3u8',
+      '',
+    ].join('\n'));
+    routes.set('/720.m3u8', '#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg720-0.ts\n');
+    routes.set('/480.m3u8', '#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg480-0.ts\n');
+    routes.set('/seg720-0.ts', Buffer.from('0123456789ABCDEF'));
+
+    const res = await extractVidmoly(`${host}/v/iztl71ko757x`);
+    assert.equal(res.master, `${host}/master.m3u8?t=abc`);
+    assert.equal(res.playlistHttp, 200);
+    assert.equal(res.variants.length, 2);
+    assert.equal(res.best, `${host}/720.m3u8`);
+    assert.equal(res.subtitles.length, 1);
+
+    // Ré-écriture JSON : tout passe par le proxy, sous-titres inclus.
+    applyProxyMode(res, fakeVidmolyProxy);
+    assert.equal(res.proxied, true);
+    assert.ok(res.master.startsWith('https://srv/vidmoly?stream='));
+    assert.ok(res.subtitles[0].file.startsWith('https://srv/vidmoly?stream='));
+
+    // Relais de la playlist master : réécrite vers ?stream=.
+    let mock = mockRes();
+    await serveStream({ headers: {} }, mock, `${host}/master.m3u8?t=abc`, fakeVidmolyProxy, vidmolyOpts);
+    assert.equal(mock.statusCode, 200);
+    assert.match(mock.headers['content-type'], /mpegurl/);
+    assert.match(mock.body.toString('utf8'), /stream=http%3A%2F%2Flocalhost/);
+    // Relais d'un segment en Range (100 premiers octets -> ici 0-3).
+    mock = mockRes();
+    await serveStream({ headers: { range: 'bytes=0-3' } }, mock, `${host}/seg720-0.ts`, fakeVidmolyProxy, vidmolyOpts);
+    assert.equal(mock.statusCode, 206);
+    assert.equal(mock.body.toString('utf8'), '0123');
+    // Hôte non autorisé : refusé (anti-SSRF).
+    mock = mockRes();
+    await serveStream({ headers: {} }, mock, 'https://evil.example.com/x.ts', fakeVidmolyProxy, {
+      ...vidmolyOpts,
+      allowedHost: vidmolyMediaHostAllowed,
+    });
+    assert.equal(mock.statusCode, 400);
   } finally {
     server.close();
   }
@@ -261,6 +390,39 @@ if (LIVE) {
       assert.ok(j.master);
       assert.ok(['m3u8', 'mp4'].includes(j.type));
       console.log(`    master: ${String(j.master).slice(0, 90)}… (type ${j.type})`);
+    });
+  });
+  await ok('GET /vidmoly?id=iztl71ko757x&proxy=1 + ?stream= (réel)', async () => {
+    await withServer(18085, async (base) => {
+      let r = await fetch(base + '/vidmoly?id=iztl71ko757x&proxy=1');
+      assert.equal(r.status, 200);
+      const j = await r.json();
+      assert.equal(j.proxied, true);
+      assert.ok(j.best.startsWith(base + '/vidmoly?stream='));
+      // La playlist proxifiée doit être servie et réécrite — sauf si le CDN
+      // refuse l'IP de cet environnement (protection par IP, IP tournante) :
+      // dans ce cas le relais répond 502 et on ne peut pas valider la suite ici.
+      // Sur Railway (IP fixe), toute la chaîne part de la même IP et passe.
+      r = await fetch(j.master);
+      if (r.status === 502) {
+        console.log('    playlist inaccessible depuis cet environnement (IP tournante, 403 amont) — à valider sur Railway (IP fixe)');
+        return;
+      }
+      assert.equal(r.status, 200);
+      const body = await r.text();
+      assert.match(body, /#EXT-X-STREAM-INF/);
+      assert.match(body, new RegExp(base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/vidmoly\\?stream='));
+      const variantUrl = body.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+      assert.ok(variantUrl, 'variante trouvée dans le master proxifié');
+      r = await fetch(variantUrl);
+      assert.equal(r.status, 200);
+      const variantBody = await r.text();
+      const seg = variantBody.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+      assert.ok(seg, 'segment trouvé dans la variante proxifiée');
+      r = await fetch(seg, { headers: { Range: 'bytes=0-99' } });
+      assert.equal(r.status, 206);
+      const buf = Buffer.from(await r.arrayBuffer());
+      assert.equal(buf.length, 100);
     });
   });
 }

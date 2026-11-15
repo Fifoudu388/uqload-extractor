@@ -1,30 +1,38 @@
 // Mode proxy de flux (port de serveStream() de uqload.php).
-// Récupère un .m3u8 ou un segment côté serveur avec Referer/Origin uqload,
+// Récupère un .m3u8 ou un segment côté serveur avec les bons headers,
 // puis le sert au client.
 // - playlist .m3u8 : les URLs sont ré-écrites vers ?stream= (le lecteur ne
-//   touche jamais uqload directement)
+//   touche jamais le CDN directement)
 // - segment : le Range du client est transmis (seek), statut 200/206 et
 //   headers utiles relayés
-// Sécurité : seuls les domaines uqload sont autorisés (anti-SSRF) et la clé
+// Sécurité : seuls les domaines autorisés sont relayés (anti-SSRF) et la clé
 // API (si configurée) est exigée en amont comme pour l'extraction.
+// `opts` (optionnel) adapte le relais à la source :
+//   allowedHost : (host) => bool   (défaut : domaines uqload)
+//   referer     : string           (défaut : https://<origine uqload>/)
+//   origin      : string           (défaut : https://<origine uqload>)
+//   label       : string           (défaut : 'uqload', pour les messages)
 import { httpFetch } from './http.js';
 import { uqloadBaseDomain, uqloadSiteOrigin } from './urls.js';
 import { rewritePlaylist } from './m3u8.js';
 import { sendJson } from './respond.js';
 
-export async function serveStream(req, res, target, proxyUrlFn) {
+export async function serveStream(req, res, target, proxyUrlFn, opts = {}) {
+  const allowedHost = opts.allowedHost ?? ((h) => uqloadBaseDomain(h) !== null);
+  const label = opts.label ?? 'uqload';
   let parsed;
   try {
     parsed = new URL(target);
   } catch {
-    return sendJson(res, { error: 'URL de flux invalide (domaines uqload uniquement)' }, 400);
+    return sendJson(res, { error: `URL de flux invalide (domaines ${label} uniquement)` }, 400);
   }
   if (!['http:', 'https:'].includes(parsed.protocol)
-    || uqloadBaseDomain(parsed.hostname) === null) {
-    return sendJson(res, { error: 'URL de flux invalide (domaines uqload uniquement)' }, 400);
+    || !allowedHost(parsed.hostname)) {
+    return sendJson(res, { error: `URL de flux invalide (domaines ${label} uniquement)` }, 400);
   }
 
-  const origin = uqloadSiteOrigin(target);
+  const origin = opts.origin ?? uqloadSiteOrigin(target);
+  const referer = opts.referer ?? `https://${origin}/`;
   const path = parsed.pathname ?? '';
   let range = req.headers.range ?? null;
   if (path.toLowerCase().endsWith('.m3u8')) {
@@ -32,7 +40,7 @@ export async function serveStream(req, res, target, proxyUrlFn) {
   }
 
   const fetched = await httpFetch(target, {
-    Referer: `https://${origin}/`,
+    Referer: referer,
     Origin: `https://${origin}`,
   }, range);
 

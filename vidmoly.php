@@ -1,9 +1,20 @@
 <?php
 /**
- * Extracteur m3u8/mp4 vidmoly — v1
+ * Extracteur m3u8/mp4 vidmoly — v2
  * ===============================
  * Usage web  : vidmoly.php?id=iztl71ko757x   (ou ?url=https://vidmoly.me/v/iztl71ko757x)
+ *              vidmoly.php?id=iztl71ko757x&proxy=1   -> URLs media via le proxy (voir ci-dessous)
+ *              vidmoly.php?stream=<url encodee>      -> relaye un flux .m3u8 ou un segment
  * Usage CLI  : php vidmoly.php iztl71ko757x
+ *
+ * Protection par IP : les URLs de flux (https://prx-....vmpx.online/...) sont
+ * liees a l'IP qui a charge la page d'integration (token ?t=...&s=...&e=43200
+ * &asn=...). Un navigateur ne peut donc pas les recuperer directement avec
+ * une autre IP (403) : le mode proxy est obligatoire pour lire. Cote serveur,
+ * toutes les requetes partent de la meme IP (celle du serveur), donc le token
+ * reste valide de la page jusqu'aux segments. Le lecteur ne parle qu'a ce
+ * serveur, qui refait les requetes vers le CDN avec les bons headers (et
+ * transmet le Range pour le seek).
  *
  * Mecanisme (documente par POC-FrAnime-Scrapping et l'extracteur VidMoly de
  * KekikStream, confirme sur la page de test) :
@@ -24,6 +35,7 @@
  *   type         : "m3u8" ou "mp4"
  *   variants     : [{bandwidth, resolution, url}] tries par qualite decroissante (m3u8)
  *   best / media : URL de la meilleure variante (ou du master si pas de variantes)
+ *   proxied      : true si les URLs passent par le proxy (?proxy=1)
  *   playlistHttp : code HTTP de la playlist master (m3u8)
  *   masterBody   : contenu brut du master .m3u8
  *   subtitles    : [{file, label, kind}] si des sous-titres sont embarques
@@ -122,6 +134,196 @@ function resolveUrl(string $base, string $rel): string
     $path = $parts['path'] ?? '/';
     $dir  = substr($path, 0, (int) strrpos($path, '/') + 1);
     return "{$scheme}://{$host}{$port}{$dir}{$rel}";
+}
+
+/**
+ * Hote autorise pour le relais de flux (?stream=) : un domaine vidmoly
+ * (me/to/net/biz, avec sous-domaines) ou le CDN des flux, *.vmpx.online
+ * (ex : prx-1331-ant-q.vmpx.online). Anti-SSRF : rien d'autre n'est relaye.
+ */
+function vidmolyMediaHostAllowed(string $host): bool
+{
+    $host = strtolower($host);
+    if (preg_match('/^(?:[a-z0-9-]+\.)*vidmoly\.(me|to|net|biz)$/', $host)) {
+        return true;
+    }
+    if (preg_match('/^(?:[a-z0-9-]+\.)*vmpx\.online$/', $host)) {
+        return true;
+    }
+    return false;
+}
+
+/** URL absolue du script courant pour atteindre le mode proxy (?stream=...). */
+function proxyUrl(string $target): string
+{
+    $proto = $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null;
+    if (!is_string($proto) || $proto === '') {
+        $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    }
+    $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $script = $_SERVER['SCRIPT_NAME'] ?? '/vidmoly.php';
+    return "{$proto}://{$host}{$script}?stream=" . rawurlencode($target);
+}
+
+/**
+ * Re-ecrit une playlist .m3u8 : chaque URI (segment ou variante) et chaque
+ * URI="..." (ex : cle EXT-X-KEY) passe par le proxy.
+ */
+function rewritePlaylist(string $body, string $baseUrl): string
+{
+    $out = [];
+    foreach (preg_split("/\r\n|\n|\r/", $body) ?: [] as $line) {
+        $trim = trim((string) $line);
+        if ($trim === '') {
+            $out[] = '';
+            continue;
+        }
+        if (str_starts_with($trim, '#')) {
+            if (str_contains($trim, 'URI="')) {
+                $trim = preg_replace_callback(
+                    '/URI="([^"]+)"/',
+                    static fn($m) => 'URI="' . proxyUrl(resolveUrl($baseUrl, $m[1])) . '"',
+                    $trim
+                ) ?? $trim;
+            }
+            $out[] = $trim;
+            continue;
+        }
+        $out[] = proxyUrl(resolveUrl($baseUrl, $trim));
+    }
+    return implode("\n", $out) . "\n";
+}
+
+/**
+ * Re-ecrit les URLs media d'une reponse JSON en URLs de proxy (?stream=...).
+ * Les URLs directes restent dans le cache ; la re-ecriture se fait a l'envoi.
+ * Les sous-titres passent aussi par le proxy : leurs fichiers sont sur le
+ * meme CDN, donc soumis a la meme protection par IP.
+ */
+function applyProxyMode(array $res): array
+{
+    $origMaster = $res['master'] ?? null;
+    if (is_string($origMaster) && $origMaster !== '') {
+        $res['master'] = proxyUrl($origMaster);
+    }
+    if (isset($res['variants']) && is_array($res['variants'])) {
+        foreach ($res['variants'] as &$v) {
+            if (isset($v['url']) && is_string($v['url'])) {
+                $v['url'] = proxyUrl($v['url']);
+            }
+        }
+        unset($v);
+    }
+    if (isset($res['best']) && is_string($res['best'])) {
+        $res['best'] = proxyUrl($res['best']);
+    }
+    if (isset($res['media']) && is_string($res['media'])) {
+        $res['media'] = proxyUrl($res['media']);
+    }
+    if (isset($res['subtitles']) && is_array($res['subtitles'])) {
+        foreach ($res['subtitles'] as &$s) {
+            if (isset($s['file']) && is_string($s['file'])) {
+                $s['file'] = proxyUrl($s['file']);
+            }
+        }
+        unset($s);
+    }
+    if (isset($res['masterBody']) && is_string($origMaster) && $origMaster !== '') {
+        $res['masterBody'] = rewritePlaylist($res['masterBody'], $origMaster);
+    }
+    $res['proxied'] = true;
+    return $res;
+}
+
+/**
+ * GET avec en-tetes de reponse captures (pour relayer statut et headers).
+ * $range : valeur brute de l'en-tete Range du client (ex : "bytes=0-1023").
+ */
+function httpFetch(string $url, array $headers = [], ?string $range = null, int $timeout = 25): array
+{
+    $respHeaders = [];
+    $allHeaders  = array_merge(['Accept: */*'], $headers);
+    if ($range !== null && $range !== '') {
+        $allHeaders[] = 'Range: ' . $range;
+    }
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 5,
+        CURLOPT_USERAGENT      => UA,
+        CURLOPT_HTTPHEADER     => $allHeaders,
+        CURLOPT_TIMEOUT        => $timeout,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_ENCODING       => '',
+        CURLOPT_HEADERFUNCTION => static function ($ch, $header) use (&$respHeaders) {
+            $len = strlen($header);
+            $parts = explode(':', $header, 2);
+            if (count($parts) === 2) {
+                $respHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+            }
+            return $len;
+        },
+    ]);
+    $body = curl_exec($ch);
+    $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+    return ['code' => $code, 'body' => $body === false ? '' : (string) $body, 'error' => $err, 'headers' => $respHeaders];
+}
+
+/**
+ * Mode proxy de flux : recupere un .m3u8 ou un segment cote serveur avec
+ * Referer/Origin vidmoly, puis le sert au client. Indispensable a cause de
+ * la protection par IP : les URLs du CDN sont liees a l'IP du serveur, un
+ * navigateur qui les recupere directement recoit 403.
+ * - playlist .m3u8 : les URLs sont re-ecrites vers ?stream= (le lecteur ne
+ *   touche jamais le CDN directement)
+ * - segment : le Range du client est transmis (seek), statut 200/206 et
+ *   headers utiles relayes
+ * Securite : seuls les domaines vidmoly et le CDN *.vmpx.online sont
+ * autorises (anti-SSRF) et la cle API (si configuree) est exigee en amont
+ * comme pour l'extraction.
+ */
+function serveStream(string $target): void
+{
+    $parts = parse_url($target);
+    if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])
+        || !in_array(strtolower($parts['scheme']), ['http', 'https'], true)
+        || !vidmolyMediaHostAllowed($parts['host'])) {
+        sendJson(['error' => 'URL de flux invalide (domaines vidmoly uniquement)'], 400);
+        return;
+    }
+    $path   = parse_url($target, PHP_URL_PATH) ?? '';
+    $range  = $_SERVER['HTTP_RANGE'] ?? null;
+    $range  = is_string($range) ? $range : null;
+    if (str_ends_with(strtolower($path), '.m3u8')) {
+        $range = null; // une playlist se recupere entiere, pas par morceaux
+    }
+    $res = httpFetch($target, ['Referer: https://vidmoly.me/', 'Origin: https://vidmoly.me'], $range);
+    if ($res['code'] < 200 || $res['code'] >= 400 || $res['body'] === '') {
+        sendJson(['error' => "flux HTTP {$res['code']} {$res['error']}"], 502);
+        return;
+    }
+    $ctype = strtolower($res['headers']['content-type'] ?? '');
+    $isPlaylist = str_ends_with(strtolower($path), '.m3u8') || str_contains($ctype, 'mpegurl');
+    if ($isPlaylist) {
+        header('Content-Type: application/vnd.apple.mpegurl; charset=utf-8');
+        header('Cache-Control: no-cache');
+        echo rewritePlaylist($res['body'], $target);
+        return;
+    }
+    http_response_code($res['code']);
+    if ($ctype !== '') {
+        header('Content-Type: ' . $res['headers']['content-type']);
+    }
+    foreach (['content-range', 'accept-ranges', 'content-length'] as $h) {
+        if (isset($res['headers'][$h])) {
+            header(ucwords($h, '-') . ': ' . $res['headers'][$h]);
+        }
+    }
+    header('Cache-Control: public, max-age=3600');
+    echo $res['body'];
 }
 
 /** Parse un master .m3u8 : variantes triees par bande passante decroissante. */
@@ -522,6 +724,18 @@ if ($auth !== null && empty($auth['open'])) {
     }
 }
 
+// ---- Mode proxy de flux : ?stream=<url encodee> (web uniquement).
+// Le lecteur ne contacte jamais le CDN directement : c'est ce serveur qui
+// refait la requete avec sa propre IP (protection par IP, voir en-tete).
+$stream = $_GET['stream'] ?? null;
+if (is_string($stream) && $stream !== '' && php_sapi_name() !== 'cli') {
+    serveStream($stream);
+    exit;
+}
+
+// ---- Mode proxy JSON : ?proxy=1 -> les URLs media de la reponse passent par ?stream=
+$proxyMode = isset($_GET['proxy']) && $_GET['proxy'] !== '' && $_GET['proxy'] !== '0' && php_sapi_name() !== 'cli';
+
 $pageUrl = buildPageUrl(is_string($input) ? $input : null, is_string($url) ? $url : null);
 if ($pageUrl === null) {
     sendJson(['error' => 'param ?id= (code video vidmoly) ou ?url= (lien vidmoly.me/to/net/biz) requis/valide'], 400);
@@ -537,6 +751,9 @@ if ($cached !== null) {
     $cached['cached'] = true;
     if ($auth !== null && !empty($auth['name'])) {
         $cached['key_name'] = $auth['name'];
+    }
+    if ($proxyMode) {
+        $cached = applyProxyMode($cached);
     }
     sendJson($cached);
     exit;
@@ -561,15 +778,18 @@ if (stripos($master, '.m3u8') !== false) {
             $res['media']    = $variants[0]['url'];
         } else {
             // Playlist media directe (pas de variantes) : le master est deja le flux.
+            $res['best']  = $master;
             $res['media'] = $master;
         }
         $res['masterBody'] = trim($pl['body']);
     } else {
         // Playlist injoignable : le master reste utilisable tel quel.
+        $res['best']  = $master;
         $res['media'] = $master;
     }
 } else {
     $res['type']  = 'mp4';
+    $res['best']  = $master;
     $res['media'] = $master;
 }
 
@@ -577,5 +797,8 @@ cacheSet($cacheKey, $res, $cacheTtl);
 $res['cached'] = false;
 if ($auth !== null && !empty($auth['name'])) {
     $res['key_name'] = $auth['name'];
+}
+if ($proxyMode) {
+    $res = applyProxyMode($res);
 }
 sendJson($res);

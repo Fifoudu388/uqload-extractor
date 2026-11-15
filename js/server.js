@@ -5,7 +5,7 @@
 //   GET /                  -> healthcheck JSON
 //   GET /uqload[?id=|?url=]      (+ ?proxy=1, ?stream=...) — voir src/uqload.js
 //   GET /uqload.php ...           (alias, même comportement — compatible PHP)
-//   GET /vidmoly[?id=|?url=]     — voir src/vidmoly.js
+//   GET /vidmoly[?id=|?url=]     (+ ?proxy=1, ?stream=...) — voir src/vidmoly.js
 //   GET /vidmoly.php ...          (alias, même comportement — compatible PHP)
 //
 // Auth API (UQLOAD_API_KEYS) et rate limit : voir src/auth.js — la même
@@ -45,7 +45,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, {
         status: 'online',
         service: 'uqload + vidmoly extractors (Node.js)',
-        usage: '/uqload?id=VIDEO_ID (&proxy=1 pour passer le flux par le proxy) ou /vidmoly?id=VIDEO_ID (ou ?url=...)',
+        usage: '/uqload?id=VIDEO_ID (&proxy=1 pour passer le flux par le proxy) ou /vidmoly?id=VIDEO_ID (&proxy=1 aussi — obligatoire, les flux vidmoly sont liés à l’IP du serveur)',
         example: '/vidmoly?id=iztl71ko757x',
       });
     }

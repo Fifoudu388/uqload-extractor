@@ -116,6 +116,8 @@ export function buildPageUrl(input, url) {
 /**
  * Ré-écrit les URLs média d'une réponse JSON en URLs de proxy (?stream=...).
  * Les URLs directes restent dans le cache ; la ré-écriture se fait à l'envoi.
+ * Les sous-titres (vidmoly) passent aussi par le proxy : leurs fichiers sont
+ * sur le même CDN, donc soumis à la même protection par IP.
  */
 export function applyProxyMode(res, proxyUrlFn) {
   const origMaster = typeof res.master === 'string' ? res.master : null;
@@ -127,6 +129,11 @@ export function applyProxyMode(res, proxyUrlFn) {
   }
   if (typeof res.best === 'string') res.best = proxyUrlFn(res.best);
   if (typeof res.media === 'string') res.media = proxyUrlFn(res.media);
+  if (Array.isArray(res.subtitles)) {
+    for (const s of res.subtitles) {
+      if (s && typeof s.file === 'string') s.file = proxyUrlFn(s.file);
+    }
+  }
   if (typeof res.masterBody === 'string' && origMaster) {
     res.masterBody = rewritePlaylist(res.masterBody, origMaster, proxyUrlFn);
   }

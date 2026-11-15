@@ -40,6 +40,10 @@ GET /vidmoly.php?id=iztl71ko757x
 # vidmoly — par URL complète (/v/ ou /embed-...html, domaines .me/.to/.net/.biz)
 GET /vidmoly.php?url=https://vidmoly.me/v/iztl71ko757x
 
+# vidmoly — via le proxy (OBLIGATOIRE, protection par IP — voir ci-dessous)
+GET /vidmoly.php?id=iztl71ko757x&proxy=1
+GET /vidmoly.php?stream=https%3A%2F%2Fprx-....vmpx.online%2F...%2Fmaster.m3u8
+
 # En CLI
 php uqload.php v80v3zz0vay2
 php vidmoly.php iztl71ko757x
@@ -64,6 +68,7 @@ php vidmoly.php iztl71ko757x
 
 - `variants` : toutes les qualités du master, triées par bande passante décroissante.
 - `best` / `media` : URL de la meilleure variante (ou du master s'il n'y a pas de variantes).
+- `proxied` : `true` si les URLs passent par le proxy (`?proxy=1`).
 - `cached` : `true` si la réponse vient du cache (durée par défaut : 1h).
 - `type` (vidmoly) : `"m3u8"` ou `"mp4"` selon le flux trouvé.
 - `subtitles` (vidmoly) : sous-titres embarqués `[{file, label, kind}]`, si présents.
@@ -103,6 +108,29 @@ GET /uqload.php?stream=https%3A%2F%2Fstrm1.uqload.vc%2F...%2Fmaster.m3u8
 
 - Seuls les domaines uqload sont autorisés (`?stream=` ne sert pas de proxy
   ouvert).
+- La clé API (si configurée) est exigée aussi sur `?stream=` et `?proxy=1`.
+- Le proxy ne met pas les segments en cache (ils sont relayés à la demande).
+
+### vidmoly : protection par IP — le proxy est obligatoire
+
+Les flux vidmoly (`https://prx-....vmpx.online/.../master.m3u8?t=...&s=...&e=43200&asn=...`)
+sont **liés à l'IP qui a chargé la page d'intégration** : le token est valable
+12 h mais uniquement depuis cette IP. Un navigateur qui récupère le `.m3u8`
+ou les segments directement, avec une autre IP, reçoit `403` — même avec le
+bon `Referer`. La lecture directe est donc impossible : il faut `?proxy=1`.
+
+```
+GET /vidmoly.php?id=iztl71ko757x&proxy=1
+```
+
+La réponse JSON renvoie alors les URLs des médias (et des sous-titres) via le
+proxy, et les playlists sont réécrites pour que chaque variante, segment et
+clé passe aussi par le proxy. Côté serveur, toutes les requêtes partent de la
+même IP (celle du serveur Railway), donc le token reste valide de la page
+jusqu'aux segments. Le `Range` est transmis (seek, réponse `206`).
+
+- Seuls les domaines vidmoly (`.me`/`.to`/`.net`/`.biz`) et le CDN des flux
+  (`*.vmpx.online`) sont autorisés en `?stream=` (anti-SSRF).
 - La clé API (si configurée) est exigée aussi sur `?stream=` et `?proxy=1`.
 - Le proxy ne met pas les segments en cache (ils sont relayés à la demande).
 

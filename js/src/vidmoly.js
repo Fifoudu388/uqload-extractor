@@ -1,9 +1,18 @@
 // Extracteur m3u8/mp4 vidmoly — version Node.js
 // ===========================================
-// Port fidèle de vidmoly.php (v1).
+// Port fidèle de vidmoly.php (v1 + mode proxy).
 //
 // Usage web  : /vidmoly?id=iztl71ko757x   (ou ?url=https://vidmoly.me/v/iztl71ko757x)
+//              /vidmoly?id=iztl71ko757x&proxy=1   -> URLs média via le proxy
+//              /vidmoly?stream=<url encodée>      -> relaye un flux .m3u8 ou un segment
 // Usage CLI  : node cli.js vidmoly iztl71ko757x
+//
+// Protection par IP : les URLs de flux (https://prx-....vmpx.online/...) sont
+// liées à l'IP qui a chargé la page d'intégration (token ?t=...&s=...&e=43200
+// &asn=...). Un navigateur ne peut donc pas les récupérer directement avec
+// une autre IP (403) : le mode proxy est obligatoire pour lire. Côté serveur,
+// toutes les requêtes partent de la même IP (celle du serveur), donc le token
+// reste valide de la page jusqu'aux segments.
 //
 // Mécanisme (documenté par POC-FrAnime-Scrapping et l'extracteur VidMoly de
 // KekikStream, confirmé sur la page de test) :
@@ -21,9 +30,11 @@
 import { VIDMOLY_HOSTS } from './constants.js';
 import { stripcslashes } from './depacker.js';
 import { httpGet, httpPost } from './http.js';
-import { resolveUrl } from './urls.js';
+import { resolveUrl, vidmolyMediaHostAllowed } from './urls.js';
 import { parseMasterPlaylist } from './m3u8.js';
 import { cacheGet, cacheSet, cacheKeyFor } from './cache.js';
+import { applyProxyMode } from './uqload.js';
+import { serveStream } from './proxy.js';
 import { sendJson } from './respond.js';
 
 /** Décode les entités HTML (&amp; &quot; &#039; &#x27; &#123; ...). */
@@ -205,15 +216,18 @@ export async function extractVidmoly(pageUrl) {
         res.media = variants[0].url;
       } else {
         // Playlist média directe (pas de variantes) : le master est déjà le flux.
+        res.best = master;
         res.media = master;
       }
       res.masterBody = pl.body.trim();
     } else {
       // Playlist injoignable : le master reste utilisable tel quel.
+      res.best = master;
       res.media = master;
     }
   } else {
     res.type = 'mp4';
+    res.best = master;
     res.media = master;
   }
   return res;
@@ -242,7 +256,25 @@ export function buildPageUrl(input, url) {
 
 /** Gestionnaire web : /vidmoly et /vidmoly.php. */
 export async function handleVidmoly(req, res, ctx) {
-  const { searchParams, auth, cacheTtl } = ctx;
+  const { searchParams, auth, proxyUrlFn, cacheTtl } = ctx;
+
+  // Mode proxy de flux : ?stream=<url encodée> (web uniquement).
+  // Le lecteur ne contacte jamais le CDN directement : c'est ce serveur qui
+  // refait la requête avec sa propre IP (protection par IP, voir en-tête).
+  const stream = searchParams.get('stream');
+  if (stream) {
+    await serveStream(req, res, stream, proxyUrlFn, {
+      allowedHost: vidmolyMediaHostAllowed,
+      referer: 'https://vidmoly.me/',
+      origin: 'vidmoly.me',
+      label: 'vidmoly',
+    });
+    return;
+  }
+
+  // Mode proxy JSON : ?proxy=1 -> les URLs média de la réponse passent par ?stream=
+  const proxyParam = searchParams.get('proxy');
+  const proxyMode = proxyParam !== null && proxyParam !== '' && proxyParam !== '0';
 
   const pageUrl = buildPageUrl(searchParams.get('id'), searchParams.get('url'));
   if (pageUrl === null) {
@@ -254,6 +286,7 @@ export async function handleVidmoly(req, res, ctx) {
   if (cached !== null) {
     cached.cached = true;
     if (auth && auth.name) cached.key_name = auth.name;
+    if (proxyMode) applyProxyMode(cached, proxyUrlFn);
     return sendJson(res, cached);
   }
 
@@ -265,5 +298,6 @@ export async function handleVidmoly(req, res, ctx) {
   cacheSet(key, result, cacheTtl);
   result.cached = false;
   if (auth && auth.name) result.key_name = auth.name;
+  if (proxyMode) applyProxyMode(result, proxyUrlFn);
   return sendJson(res, result);
 }
