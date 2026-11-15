@@ -12,6 +12,10 @@ d'une page [_uqload_](https://uqload.vc) ou [_vidmoly_](https://vidmoly.me).
 
 ## Version JavaScript (Node.js)
 
+> **WIP — non maintenue.** La version JavaScript n'est plus prise en charge :
+> seule la version PHP ci-dessus est maintenue. Le dossier [`js/`](js/)
+> reste disponible tel quel, sans garantie de mise à jour.
+
 La **même chose en JavaScript** existe dans le dossier [`js/`](js/) : Node.js 18+,
 **sans aucune dépendance**, même comportement, mêmes routes (`/uqload`,
 `/vidmoly` — avec les alias `/uqload.php` et `/vidmoly.php` pour rester

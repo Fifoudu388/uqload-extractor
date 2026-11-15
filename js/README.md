@@ -1,5 +1,9 @@
 # uqload + vidmoly — extracteurs vidéo (version Node.js)
 
+> **WIP — non maintenue.** Cette version JavaScript n'est plus prise en charge :
+> seule la version PHP (à la racine du dépôt) est maintenue. Le code reste
+> disponible tel quel, sans garantie de mise à jour.
+
 Même chose que la version PHP à la racine du dépôt, réécrite en JavaScript
 (Node.js 18+, **sans aucune dépendance**). Même comportement, mêmes routes,
 mêmes variables d'environnement — les deux versions peuvent tourner côte à
