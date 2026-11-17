@@ -1,7 +1,9 @@
-# uqload + vidmoly — extracteurs vidéo
+# uqload + vidmoly + streamtape + lulustream — extracteurs vidéo
 
 Extrait l'URL du flux direct (`.m3u8` HLS, avec toutes ses variantes de qualité)
-d'une page [_uqload_](https://uqload.vc) ou [_vidmoly_](https://vidmoly.me).
+d'une page [_uqload_](https://uqload.vc) ou [_vidmoly_](https://vidmoly.me), ou l'URL
+du MP4 direct d'une page [_streamtape_](https://streamtape.com), ou le flux HLS
+d'une page [_lulustream_](https://lulustream.com) (domaine alternatif : lplaygo.com).
 
 - **uqload** : le token est régénéré à chaque chargement de page (valide ~4h)
   et se trouve dans un script obfusqué par le packer « Dean Edwards ».
@@ -9,6 +11,13 @@ d'une page [_uqload_](https://uqload.vc) ou [_vidmoly_](https://vidmoly.me).
   d'intégration (`/embed-<id>.html`, domaine `vidmoly.biz`), dont le lecteur
   JW Player embarque le `file: ...master.m3u8...` dans le HTML. Le formulaire
   de vérification éventuel (« Select number ») est soumis automatiquement.
+- **streamtape** : le lien direct `get_video?...` est assemblé en JavaScript
+  dans la page (fragments concaténés avec `.substring()`, écrits dans un
+  élément `...link`) ; c'est un MP4 direct, pas du HLS. Le proxy est
+  recommandé (voir ci-dessous).
+- **lulustream** : la config du lecteur (`sources:[{file: ...master.m3u8...}]`)
+  est cachée dans du JavaScript obfusqué par le packer « Dean Edwards », à
+  dépacker. Le proxy est recommandé (voir ci-dessous).
 
 ## Version JavaScript (Node.js)
 
@@ -48,9 +57,29 @@ GET /vidmoly.php?url=https://vidmoly.me/v/iztl71ko757x
 GET /vidmoly.php?id=iztl71ko757x&proxy=1
 GET /vidmoly.php?stream=https%3A%2F%2Fprx-....vmpx.online%2F...%2Fmaster.m3u8
 
+# streamtape — par code vidéo
+GET /streamtape.php?id=MkGWp47a8bUma4o
+
+# streamtape — par URL complète (/v/ ou /e/, streamtape.com et miroirs)
+GET /streamtape.php?url=https://streamtape.com/v/MkGWp47a8bUma4o
+
+# streamtape — via le proxy (recommandé, voir ci-dessous)
+GET /streamtape.php?id=MkGWp47a8bUma4o&proxy=1
+
+# lulustream — par code vidéo
+GET /lulustream.php?id=q7qp31locaqo
+
+# lulustream — par URL complète (/e/ ou /d/, lulustream.com ou lplaygo.com)
+GET /lulustream.php?url=https://lplaygo.com/d/q7qp31locaqo
+
+# lulustream — via le proxy (recommandé, voir ci-dessous)
+GET /lulustream.php?id=q7qp31locaqo&proxy=1
+
 # En CLI
 php uqload.php v80v3zz0vay2
 php vidmoly.php iztl71ko757x
+php streamtape.php MkGWp47a8bUma4o
+php lulustream.php q7qp31locaqo
 ```
 
 ## Réponse JSON
@@ -74,9 +103,11 @@ php vidmoly.php iztl71ko757x
 - `best` / `media` : URL de la meilleure variante (ou du master s'il n'y a pas de variantes).
 - `proxied` : `true` si les URLs passent par le proxy (`?proxy=1`).
 - `cached` : `true` si la réponse vient du cache (durée par défaut : 1h).
-- `type` (vidmoly) : `"m3u8"` ou `"mp4"` selon le flux trouvé.
-- `subtitles` (vidmoly) : sous-titres embarqués `[{file, label, kind}]`, si présents.
-- `embed` (vidmoly) : URL de la page d'intégration utilisée.
+- `type` : `"m3u8"` ou `"mp4"` selon le flux trouvé (streamtape : toujours `"mp4"`).
+- `title` (streamtape, lulustream) : titre de la vidéo, si trouvé.
+- `poster` (lulustream) : URL de la miniature, si présente (non proxée).
+- `subtitles` (vidmoly, lulustream) : sous-titres embarqués `[{file, label, kind}]`, si présents.
+- `embed` (vidmoly, streamtape, lulustream) : URL de la page d'intégration utilisée.
 
 Codes HTTP : `200` succès, `400` paramètre `id`/`url` manquant ou invalide,
 `401` clé API manquante/invalide (si des clés sont configurées), `429` rate
@@ -138,11 +169,53 @@ jusqu'aux segments. Le `Range` est transmis (seek, réponse `206`).
 - La clé API (si configurée) est exigée aussi sur `?stream=` et `?proxy=1`.
 - Le proxy ne met pas les segments en cache (ils sont relayés à la demande).
 
+### streamtape : lien émis par page, proxy recommandé
+
+Le lien `get_video` est assemblé à chaque chargement de page (token +
+`&stream=1`) et limité dans le temps ; la limitation par IP n'est **pas
+vérifiée** (aucun des extracteurs open source lus — ResolveURL, AdultHideout,
+CyberDropDownloader — ne démontre de contrôle d'IP : les paramètres exacts
+du lien ne sont jamais parsés par ces codes). Le plus sûr est donc de
+générer le lien et de le consommer depuis la même IP : `?proxy=1`.
+
+```
+GET /streamtape.php?id=MkGWp47a8bUma4o&proxy=1
+```
+
+Attention : streamtape.com est protégé par Cloudflare — un fetch serveur en
+cURL simple peut recevoir un 503. Si la page répond 503, c'est très
+probablement Cloudflare, pas un bug de l'extracteur.
+
+- Seuls les domaines streamtape et le CDN `*.tapecontent.net` sont autorisés
+  en `?stream=` (anti-SSRF).
+- La clé API (si configurée) est exigée aussi sur `?stream=` et `?proxy=1`.
+- Le proxy ne met pas les segments en cache (ils sont relayés à la demande).
+
+### lulustream : lien émis par page, proxy recommandé
+
+Le `.m3u8` est émis à chaque chargement de page et limité dans le temps ;
+la limitation par IP n'est **pas vérifiée** non plus (même réserve que pour
+streamtape). Le plus sûr est le même : `?proxy=1`.
+
+```
+GET /lulustream.php?id=q7qp31locaqo&proxy=1
+```
+
+Deux particularités : le fetch doit rester en cURL simple — les empreintes
+TLS façon cloudscraper sont détectées par le CDN et donnent des tokens en
+403 — et le CDN refuse les requêtes sans Referer, d'où le `Referer` +
+`Origin` (origine de la page d'intégration) envoyés sur chaque requête.
+
+- Seuls les domaines lulustream (dont lplaygo.com) et le CDN `*.tnmr.org`
+  sont autorisés en `?stream=` (anti-SSRF).
+- La clé API (si configurée) est exigée aussi sur `?stream=` et `?proxy=1`.
+- Le proxy ne met pas les segments en cache (ils sont relayés à la demande).
+
 ## Clés API
 
 Par défaut, l'API est ouverte. Pour la protéger, définis la variable
-`UQLOAD_API_KEYS` (une clé par ligne) — **la même variable protège les deux
-extracteurs** (`uqload.php` et `vidmoly.php`) :
+`UQLOAD_API_KEYS` (une clé par ligne) — **la même variable protège les quatre
+extracteurs** (`uqload.php`, `vidmoly.php`, `streamtape.php` et `lulustream.php`) :
 
 ```
 visionary:sk_live_abc123:60
@@ -206,8 +279,10 @@ PHP 8.0+ requis, extension `curl` activée.
 2. Sur [railway.app](https://railway.app) : **New Project → Deploy from GitHub repo**
    → choisis le dépôt. Railway détecte le `Dockerfile` et `railway.toml` tout seul.
 3. Dans **Settings → Networking → Generate Domain** pour avoir l'URL publique.
-4. Teste : `https://ton-app.up.railway.app/uqload.php?id=v80v3zz0vay2`
-   et `https://ton-app.up.railway.app/vidmoly.php?id=iztl71ko757x`
+4. Teste : `https://ton-app.up.railway.app/uqload.php?id=v80v3zz0vay2`,
+   `https://ton-app.up.railway.app/vidmoly.php?id=iztl71ko757x`,
+   `https://ton-app.up.railway.app/streamtape.php?id=MkGWp47a8bUma4o&proxy=1`
+   et `https://ton-app.up.railway.app/lulustream.php?id=q7qp31locaqo&proxy=1`
 
 `PORT` est injecté automatiquement par Railway, rien à configurer.
 
