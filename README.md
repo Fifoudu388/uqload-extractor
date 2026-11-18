@@ -195,6 +195,19 @@ probablement Cloudflare, pas un bug de l'extracteur.
 > arguments, enchaînés, et lit le vrai lien depuis `#botlink` (celui que le
 > lecteur vidéo de la page utilise), puis `#robotlink`, en préférant une URL
 > dont l'hôte est celui de la page d'intégration.
+>
+> **v1.2 (18 novembre 2026)** — le relais `?stream=` diffuse le MP4 en
+> streaming (WRITEFUNCTION) au lieu de le télécharger entièrement en
+> mémoire avant de répondre : avant, un fichier de 659 Mo mourait à 28 Mo
+> avec « Operation timed out after 25172 milliseconds » (timeout cURL de
+> 25 s + mémoire). Plus de limite d'exécution PHP côté relais, pas de
+> tampon de sortie, coupure seulement si le débit tombe sous 1 Ko/s
+> pendant 60 s. Vérifié en local avec un vrai PHP : fichier de 200 Mo
+> relayé avec 2 Mo de mémoire max, Range (206) et erreur 404 testés.
+> (Le flux vidéo complet n'a pas pu être validé depuis le sandbox : son
+> IP de sortie tourne à chaque requête et le CDN StreamTape refuse alors
+> l'URL signée avec « unauthorized request » — le test décisif se fait
+> sur Railway, où le serveur a une IP de sortie stable.)
 
 - Seuls les domaines streamtape et le CDN `*.tapecontent.net` sont autorisés
   en `?stream=` (anti-SSRF).

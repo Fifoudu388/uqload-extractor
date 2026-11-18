@@ -1,6 +1,6 @@
 <?php
 /**
- * Extracteur MP4 streamtape — v1.1
+ * Extracteur MP4 streamtape — v1.2
  * ==============================
  * Usage web  : streamtape.php?id=MkGWp47a8bUma4o
  *              streamtape.php?id=MkGWp47a8bUma4o&proxy=1   -> URL media via le proxy (voir ci-dessous)
@@ -32,6 +32,14 @@
  *      redirection 302 vers le fichier final sur le CDN.
  *   4. Les en-tetes requis : User-Agent de navigateur + Referer = URL de
  *      la page d'integration.
+ *
+ * Relais (?stream=) : le MP4 est diffuse en streaming (WRITEFUNCTION),
+ * jamais stocke en memoire — v1.2 (18 novembre 2026). Avant, le relais
+ * telechargeait tout le fichier avant de repondre (RETURNTRANSFER + timeout
+ * 25 s) : un fichier de 659 Mo mourait a 28 Mo avec "Operation timed out
+ * after 25172 milliseconds". Pas de limite d'execution PHP cote relais,
+ * pas de tampon de sortie, coupure seulement si le debit tombe sous
+ * 1 Ko/s pendant 60 s.
  *
  * Cloudflare : streamtape.com est protege par Cloudflare — un fetch serveur
  * en cURL simple peut recevoir un 503 (ResolveURL le signale comme
@@ -196,19 +204,35 @@ function applyProxyMode(array $res): array
 }
 
 /**
- * GET avec en-tetes de reponse captures (pour relayer statut et headers).
+ * GET en streaming : le corps est envoye au client au fur et a mesure
+ * (WRITEFUNCTION), sans etre stocke en memoire — indispensable pour un
+ * MP4 de plusieurs centaines de Mo : avec RETURNTRANSFER, le relais devait
+ * telecharger tout le fichier avant de repondre et mourait sur le timeout
+ * (25 s) ou la memoire (erreur vue le 18 novembre 2026 : 28 Mo recus sur
+ * 659 Mo, "Operation timed out after 25172 milliseconds").
+ * Les en-tetes de reponse sont envoyes a l'arrivee du premier morceau de
+ * corps (le statut est alors connu). En cas d'erreur HTTP (>= 400), le
+ * corps n'est pas diffuse : il est collecte pour le message d'erreur.
  * $range : valeur brute de l'en-tete Range du client (ex : "bytes=0-1023").
+ * $timeout : 0 = pas de limite dure ; les transferts bloques sont coupes
+ * par LOW_SPEED (moins de 1 Ko/s pendant 60 s).
+ * Retourne ['code', 'headers', 'bytes', 'error', 'sent', 'error_body'] ;
+ * 'sent' dit si des octets ont deja ete envoyes au client (auquel cas on
+ * ne peut plus repondre une erreur JSON).
  */
-function httpFetch(string $url, array $headers = [], ?string $range = null, int $timeout = 25): array
+function httpFetchStream(string $url, array $headers = [], ?string $range = null, int $timeout = 0): array
 {
     $respHeaders = [];
-    $allHeaders  = array_merge(['Accept: */*'], $headers);
+    $status = 0;
+    $sent = false;
+    $errorBody = '';
+    $bytes = 0;
+    $ch = curl_init($url);
+    $allHeaders = array_merge(['Accept: */*'], $headers);
     if ($range !== null && $range !== '') {
         $allHeaders[] = 'Range: ' . $range;
     }
-    $ch = curl_init($url);
     curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_MAXREDIRS      => 5,
         CURLOPT_USERAGENT      => UA,
@@ -216,29 +240,68 @@ function httpFetch(string $url, array $headers = [], ?string $range = null, int 
         CURLOPT_TIMEOUT        => $timeout,
         CURLOPT_CONNECTTIMEOUT => 10,
         CURLOPT_ENCODING       => '',
-        CURLOPT_HEADERFUNCTION => static function ($ch, $header) use (&$respHeaders) {
+        CURLOPT_LOW_SPEED_LIMIT => 1024,
+        CURLOPT_LOW_SPEED_TIME  => 60,
+        CURLOPT_HEADERFUNCTION => static function ($ch, $header) use (&$respHeaders, &$status) {
             $len = strlen($header);
+            if (preg_match('~^HTTP/\S+\s+(\d{3})~', $header, $m)) {
+                $status = (int) $m[1];
+            }
             $parts = explode(':', $header, 2);
             if (count($parts) === 2) {
                 $respHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
             }
             return $len;
         },
+        CURLOPT_WRITEFUNCTION => static function ($ch, $chunk) use (&$status, &$sent, &$errorBody, &$bytes, &$respHeaders) {
+            $len = strlen($chunk);
+            $bytes += $len;
+            $code = $status > 0 ? $status : (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            if ($code >= 400 || $code < 200) {
+                // Erreur HTTP : on ne diffuse rien, on collecte pour le message d'erreur.
+                $errorBody .= $chunk;
+                return $len;
+            }
+            if (!$sent) {
+                $sent = true;
+                http_response_code($code > 0 ? $code : 200);
+                $ctype = strtolower($respHeaders['content-type'] ?? '');
+                if ($ctype !== '') {
+                    header('Content-Type: ' . $respHeaders['content-type']);
+                }
+                foreach (['content-range', 'accept-ranges', 'content-length'] as $h) {
+                    if (isset($respHeaders[$h])) {
+                        header(ucwords($h, '-') . ': ' . $respHeaders[$h]);
+                    }
+                }
+                header('Cache-Control: public, max-age=3600');
+            }
+            echo $chunk;
+            flush();
+            return $len;
+        },
     ]);
-    $body = curl_exec($ch);
+    $ok = curl_exec($ch);
+    $err = curl_error($ch);
     $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $err  = curl_error($ch);
     curl_close($ch);
-    return ['code' => $code, 'body' => $body === false ? '' : (string) $body, 'error' => $err, 'headers' => $respHeaders];
+    return [
+        'code' => $code,
+        'headers' => $respHeaders,
+        'bytes' => $bytes,
+        'error' => $ok === false ? $err : '',
+        'sent' => $sent,
+        'error_body' => $errorBody,
+    ];
 }
 
 /**
  * Mode proxy de flux : recupere le MP4 cote serveur avec Referer = page
- * d'integration, puis le sert au client. Recommande (voir en-tete) : le
- * lien get_video est emis par page et limite dans le temps, et la
- * limitation par IP n'est pas exclue. Le Range du client est transmis
- * (seek), statut 200/206 et headers utiles relayes. La redirection 302
- * vers le CDN final est suivie cote serveur.
+ * d'integration, puis le sert au client en streaming. Recommande
+ * (voir en-tete) : le lien get_video est emis par page et limite dans le
+ * temps, et la limitation par IP n'est pas exclue. Le Range du client est
+ * transmis (seek), statut 200/206 et headers utiles relayes. La redirection
+ * 302 vers le CDN final est suivie cote serveur.
  * Securite : seuls les domaines streamtape et le CDN *.tapecontent.net
  * sont autorises (anti-SSRF) et la cle API (si configuree) est exigee
  * en amont comme pour l'extraction.
@@ -268,23 +331,26 @@ function serveStream(string $target): void
     }
     $range = $_SERVER['HTTP_RANGE'] ?? null;
     $range = is_string($range) ? $range : null;
-    $res = httpFetch($target, ["Referer: {$origin}/", "Origin: {$origin}"], $range);
-    if ($res['code'] < 200 || $res['code'] >= 400 || $res['body'] === '') {
+    // Un gros fichier met plusieurs minutes a traverser le relais : pas de
+    // limite d'execution PHP, pas de tampon de sortie (sinon rien ne part
+    // avant la fin du transfert) et pas de compression (elle tamponne aussi).
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(0);
+    }
+    if (function_exists('ini_set')) {
+        @ini_set('zlib.output_compression', '0');
+    }
+    while (ob_get_level() > 0) {
+        ob_end_flush();
+    }
+    $res = httpFetchStream($target, ["Referer: {$origin}/", "Origin: {$origin}"], $range);
+    if (!$res['sent']) {
+        // Rien n'a ete envoye au client : on peut repondre une erreur JSON propre.
         sendJson(['error' => "flux HTTP {$res['code']} {$res['error']}"], 502);
         return;
     }
-    http_response_code($res['code']);
-    $ctype = strtolower($res['headers']['content-type'] ?? '');
-    if ($ctype !== '') {
-        header('Content-Type: ' . $res['headers']['content-type']);
-    }
-    foreach (['content-range', 'accept-ranges', 'content-length'] as $h) {
-        if (isset($res['headers'][$h])) {
-            header(ucwords($h, '-') . ': ' . $res['headers'][$h]);
-        }
-    }
-    header('Cache-Control: public, max-age=3600');
-    echo $res['body'];
+    // Sinon le flux a demarre (ou a ete coupe en cours de route) : le
+    // lecteur reessaiera en Range si besoin, rien de plus a faire ici.
 }
 
 /**
