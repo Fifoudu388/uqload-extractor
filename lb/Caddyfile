@@ -1,0 +1,52 @@
+# Load balancer des extracteurs (uqload / vidmoly / streamtape / lulustream)
+# ---------------------------------------------------------------------------
+# 3 backends Railway (le meme code, 3 services). Caddy repartit les requetes
+# et sort de la rotation tout backend qui ne repond plus (health checks).
+#
+# Pourquoi des sessions collantes (cookie) et pas du simple round-robin ?
+# Le lien get_video est lie a l'IP du serveur qui l'a genere : la requete
+# d'extraction (?proxy=1) et la requete de lecture (?stream=) doivent
+# arriver sur le MEME backend, sinon le CDN repond 403 "unauthorized
+# request". Caddy pose un cookie `lb` a la premiere reponse ; le navigateur
+# le renvoie ensuite, et reste donc sur le meme backend.
+# (Si un jour les 3 services partagent la meme IP de sortie, on pourra
+# passer a `lb_policy least_conn` — le backend avec le moins de requetes
+# en cours — sans cookie. Voir README.md.)
+#
+# Variables d'environnement (a definir sur le service Caddy dans Railway) :
+#   PORT          : injecte par Railway — ne pas definir a la main
+#   BACKEND_1/2/3 : URL publique de chaque service extracteur,
+#                   ex : https://extracteur-1.up.railway.app
+#                   (sans chemin, sans / final)
+
+:{$PORT} {
+	reverse_proxy {$BACKEND_1} {$BACKEND_2} {$BACKEND_3} {
+		# Sessions collantes par cookie (voir commentaire en tete).
+		lb_policy cookie lb
+
+		# Si le backend choisi ne repond pas, reessaie un autre pendant 5 s.
+		lb_try_duration 5s
+		lb_try_interval 250ms
+
+		# Health checks actifs : GET / toutes les 10 s ; un backend est
+		# retire apres 1 echec et revient apres 1 succes.
+		health_uri /
+		health_interval 10s
+		health_timeout 5s
+		health_status 2xx
+		health_passes 1
+		health_fails 1
+
+		# Health checks passifs : un backend injoignable (connexion
+		# refusee) est retire immediatement apres 1 echec, pour 30 s.
+		# Seuls les 503 comptent comme echec cote reponses : l'extracteur
+		# renvoie 502 quand c'est le CDN qui refuse, ce qui ne doit pas
+		# faire exclure le backend.
+		fail_duration 30s
+		max_fails 1
+		unhealthy_status 503
+	}
+
+	# Logs en JSON (lisibles dans les logs Railway).
+	log
+}
