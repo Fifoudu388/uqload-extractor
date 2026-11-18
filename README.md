@@ -186,6 +186,16 @@ Attention : streamtape.com est protégé par Cloudflare — un fetch serveur en
 cURL simple peut recevoir un 503. Si la page répond 503, c'est très
 probablement Cloudflare, pas un bug de l'extracteur.
 
+> **v1.1 (18 novembre 2026)** — la page écrit plusieurs URLs assemblées dont
+> certaines sont des leurres (les assignations vers `#ideoolink` pointent
+> vers un hôte bidon, ex : `streambtape.com`, et l'évaluateur ne gérait que
+> `.substring(N)` à un argument : l'id pouvait être corrompu, ex :
+> `MkGxcdbWp47a8bUma4o` au lieu de `MkGWp47a8bUma4o` → 403). L'extracteur
+> évalue désormais `.substring()` / `.substr()` / `.slice()` à 1 ou 2
+> arguments, enchaînés, et lit le vrai lien depuis `#botlink` (celui que le
+> lecteur vidéo de la page utilise), puis `#robotlink`, en préférant une URL
+> dont l'hôte est celui de la page d'intégration.
+
 - Seuls les domaines streamtape et le CDN `*.tapecontent.net` sont autorisés
   en `?stream=` (anti-SSRF).
 - La clé API (si configurée) est exigée aussi sur `?stream=` et `?proxy=1`.

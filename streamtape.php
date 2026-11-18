@@ -1,6 +1,6 @@
 <?php
 /**
- * Extracteur MP4 streamtape — v1
+ * Extracteur MP4 streamtape — v1.1
  * ==============================
  * Usage web  : streamtape.php?id=MkGWp47a8bUma4o
  *              streamtape.php?id=MkGWp47a8bUma4o&proxy=1   -> URL media via le proxy (voir ci-dessous)
@@ -8,18 +8,29 @@
  * Usage CLI  : php streamtape.php MkGWp47a8bUma4o
  *
  * Mecanisme (documente par les extracteurs open source AdultHideout,
- * ResolveURL et CyberDropDownloader, lus le 17 novembre 2026) :
+ * ResolveURL et CyberDropDownloader, lus le 17 novembre 2026, et par la
+ * lecture de la page live le 18 novembre 2026) :
  *   1. La page d'integration https://streamtape.com/e/<id> (ou la page
  *      /v/<id>) contient un <script> qui assemble l'URL directe en
  *      JavaScript : des fragments de chaine concatenes avec des
- *      .substring(N), ecrits dans un element appat dont l'id finit par
- *      "link" et tourne avec le temps (actuellement "ideoooolink" ;
- *      anciens : robotlink, botlink, ideoolink, videoolink, norobotlink).
- *      L'URL n'est donc jamais presente telle quelle dans le HTML.
- *   2. L'URL assemblee ressemble a //host/get_video?... (+ &token=...
+ *      .substring(N), .substring(N, M), .substr() ou .slice(), parfois
+ *      en chaine, ecrits dans des elements appats dont l'id finit par
+ *      "link" et tourne avec le temps (ideoolink, botlink, robotlink,
+ *      videoolink, norobotlink...).
+ *   2. ATTENTION (bug corrige en v1.1) : la page ecrit PLUSIEURS URLs
+ *      assemblees, et certaines sont des leurres — les assignations vers
+ *      #ideoolink produisent un hote bidon (ex : streambtape.com) alors
+ *      que le vrai lien est sur le meme hote que la page. Le lecteur
+ *      video de la page lit #botlink :
+ *        var srclink = $('#botlink').text() + '&stream=1';
+ *      donc #botlink est la source de reference, puis #robotlink, puis
+ *      les autres. L'evaluateur doit aussi gerer les .substring() en
+ *      chaine et a deux arguments (sinon l'id est corrompu, ex :
+ *      MkGxcdbWp47a8bUma4o au lieu de MkGWp47a8bUma4o -> 403).
+ *   3. L'URL assemblee ressemble a //host/get_video?... (+ &token=...
  *      et &stream=1). C'est un MP4 direct (pas de HLS) ; elle fait une
  *      redirection 302 vers le fichier final sur le CDN.
- *   3. Les en-tetes requis : User-Agent de navigateur + Referer = URL de
+ *   4. Les en-tetes requis : User-Agent de navigateur + Referer = URL de
  *      la page d'integration.
  *
  * Cloudflare : streamtape.com est protege par Cloudflare — un fetch serveur
@@ -277,9 +288,65 @@ function serveStream(string $target): void
 }
 
 /**
+ * Applique une methode de chaine JS (substring / substr / slice) a $s,
+ * avec la semantique JavaScript : indices colles a [0, longueur],
+ * substring echange debut/fin si debut > fin, slice accepte les negatifs.
+ * $args : indices entiers (0, 1 ou 2).
+ */
+function jsStringMethod(string $s, string $method, array $args): string
+{
+    $len = strlen($s);
+    if ($method === 'substring') {
+        $start = max(0, min($args[0] ?? 0, $len));
+        $end = isset($args[1]) ? max(0, min($args[1], $len)) : $len;
+        if ($start > $end) {
+            $tmp = $start;
+            $start = $end;
+            $end = $tmp;
+        }
+        return substr($s, $start, $end - $start);
+    }
+    if ($method === 'substr') {
+        $start = $args[0] ?? 0;
+        if ($start < 0) {
+            $start = max(0, $len + $start);
+        }
+        if ($start >= $len) {
+            return '';
+        }
+        if (!isset($args[1])) {
+            return substr($s, $start);
+        }
+        if ($args[1] <= 0) {
+            return '';
+        }
+        return substr($s, $start, $args[1]);
+    }
+    // slice
+    $start = $args[0] ?? 0;
+    if ($start < 0) {
+        $start = max(0, $len + $start);
+    } else {
+        $start = min($start, $len);
+    }
+    $end = $args[1] ?? $len;
+    if ($end < 0) {
+        $end = max(0, $len + $end);
+    } else {
+        $end = min($end, $len);
+    }
+    if ($end <= $start) {
+        return '';
+    }
+    return substr($s, $start, $end - $start);
+}
+
+/**
  * Evalue une expression JS de concatenation de chaines, du type
- *   'frag1' + 'frag2'.substring(2) + "frag3"
- * en ne gardant que les litteraux (avec leur .substring(N) eventuel).
+ *   'frag1' + 'frag2'.substring(2, 5).slice(1) + "frag3"
+ * Chaque litteral peut porter une chaine de methodes (.substring/.substr/
+ * .slice, 1 ou 2 arguments) appliquees dans l'ordre, comme en JS.
+ * Les operandes non litteraux (variables, appels de fonctions) sont ignores.
  * Retourne null si aucun litteral n'est trouve.
  */
 function evaluateConcatExpr(string $expr): ?string
@@ -287,7 +354,7 @@ function evaluateConcatExpr(string $expr): ?string
     $out   = '';
     $found = false;
     if (preg_match_all(
-        '/(?:"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"|\'([^\'\\\\]*(?:\\\\.[^\'\\\\]*)*)\')(\s*\.substring\(\s*(\d+)\s*\))?/s',
+        '/(?:"((?:[^"\\\\]|\\\\.)*)"|\'((?:[^\'\\\\]|\\\\.)*)\')((?:\s*\)?\s*\.(?:substring|substr|slice)\(\s*-?\d+\s*(?:,\s*-?\d+\s*)?\))*)?/s',
         $expr,
         $m,
         PREG_SET_ORDER
@@ -295,9 +362,20 @@ function evaluateConcatExpr(string $expr): ?string
         foreach ($m as $part) {
             $lit = ($part[1] !== '') ? $part[1] : ($part[2] ?? '');
             $lit = stripcslashes(str_replace('\\/', '/', $lit));
-            $skip = isset($part[4]) && $part[4] !== '' ? (int) $part[4] : 0;
-            if ($skip > 0) {
-                $lit = substr($lit, $skip);
+            $chain = $part[3] ?? '';
+            if ($chain !== '' && preg_match_all(
+                '/\.(substring|substr|slice)\(\s*(-?\d+)\s*(?:,\s*(-?\d+)\s*)?\)/',
+                $chain,
+                $calls,
+                PREG_SET_ORDER
+            )) {
+                foreach ($calls as $call) {
+                    $args = [(int) $call[2]];
+                    if (isset($call[3]) && $call[3] !== '') {
+                        $args[] = (int) $call[3];
+                    }
+                    $lit = jsStringMethod($lit, $call[1], $args);
+                }
             }
             $out .= $lit;
             $found = true;
@@ -332,57 +410,113 @@ function normalizeDirectUrl(string $url, string $embedUrl): ?string
 }
 
 /**
+ * Vrai si $host est l'hote de la page d'integration (ou un sous-domaine),
+ * apres suppression d'un eventuel "www." de chaque cote. Sert a ecarter
+ * les leurres : streamtape ecrit plusieurs URLs assemblees, dont certaines
+ * (souvent les premieres, vers #ideoolink) pointent vers un hote bidon
+ * (ex : streambtape.com) alors que le vrai lien est sur le meme hote que
+ * la page (voir #botlink, lu par le lecteur video).
+ */
+function sameEmbedHost(string $host, string $embedHost): bool
+{
+    $norm = static function (string $h): string {
+        $h = strtolower(trim($h));
+        if (str_starts_with($h, 'www.')) {
+            $h = substr($h, 4);
+        }
+        return $h;
+    };
+    $a = $norm($host);
+    $b = $norm($embedHost);
+    return $a === $b || str_ends_with($a, '.' . $b) || str_ends_with($b, '.' . $a);
+}
+
+/**
  * Cherche l'URL directe dans le HTML, par specificite decroissante :
- *   1. expression JS assignee a l'element appat (...link).innerHTML
+ *   1. expressions JS assignees aux elements appats (...link).innerHTML
+ *      (priorite : #botlink, lu par le lecteur video, puis #robotlink,
+ *      puis les autres) — plusieurs assignations coexistent et certaines
+ *      sont des leurres vers un hote bidon.
  *   2. variante minifiee ById('...') = "...//...get_video..."
- *   3. contenu statique de l'element appat (#ideoooolink, robotlink, ...)
+ *   3. contenu statique des elements appats (#botlink, #robotlink, ...)
  *   4. URL //.../get_video?... brute dans le HTML
+ * Dans chaque cas on prefere une URL dont l'hote est celui de la page
+ * d'integration ; a defaut on garde la premiere URL normalisee trouvee
+ * (comportement historique).
  */
 function findDirectUrl(string $html, string $embedUrl): ?string
 {
-    // Tier 1 : document.getElementById('...link').innerHTML = <expr>;
-    if (preg_match(
-        "/document\\.getElementById\\(\\s*['\"][A-Za-z0-9]*link['\"]\\s*\\)\\.innerHTML\\s*=\\s*(.+?);/is",
+    $embedHost = parse_url($embedUrl, PHP_URL_HOST);
+    $embedHost = is_string($embedHost) ? $embedHost : '';
+    $hostOk = [];
+    $any = [];
+    $consider = static function (?string $raw) use ($embedUrl, $embedHost, &$hostOk, &$any): void {
+        if ($raw === null || $raw === '') {
+            return;
+        }
+        $norm = normalizeDirectUrl($raw, $embedUrl);
+        if ($norm === null) {
+            return;
+        }
+        $any[] = $norm;
+        $host = parse_url($norm, PHP_URL_HOST);
+        if (is_string($host) && $embedHost !== '' && sameEmbedHost($host, $embedHost)) {
+            $hostOk[] = $norm;
+        }
+    };
+    $rank = static function (string $id): int {
+        $id = strtolower($id);
+        if ($id === 'botlink') {
+            return 0;
+        }
+        if ($id === 'robotlink') {
+            return 1;
+        }
+        return 2;
+    };
+
+    // Tier 1 : toutes les assignations innerHTML vers les elements appats.
+    if (preg_match_all(
+        "/document\\.getElementById\\(\\s*['\"]([A-Za-z0-9]*link)['\"]\\s*\\)\\.innerHTML\\s*=\\s*(.+?);/is",
         $html,
-        $m
+        $assigns,
+        PREG_SET_ORDER
     )) {
-        $eval = evaluateConcatExpr($m[1]);
-        if (is_string($eval)) {
-            $norm = normalizeDirectUrl($eval, $embedUrl);
-            if ($norm !== null) {
-                return $norm;
-            }
+        usort($assigns, static function (array $a, array $b) use ($rank): int {
+            return $rank($a[1]) <=> $rank($b[1]);
+        });
+        foreach ($assigns as $as) {
+            $consider(evaluateConcatExpr($as[2]));
         }
     }
     // Tier 2 : ById('...') = "//...get_video..."
     if (preg_match("/ById\\('.+?=\\s*([\"']\\/\\/[^;<]+)/s", $html, $m)) {
-        $eval = evaluateConcatExpr($m[1]);
-        if (is_string($eval)) {
-            $norm = normalizeDirectUrl($eval, $embedUrl);
-            if ($norm !== null) {
-                return $norm;
-            }
-        }
+        $consider(evaluateConcatExpr($m[1]));
     }
-    // Tier 3 : contenu statique de l'element appat
-    if (preg_match(
-        '/<(?:div|span)\b[^>]*\bid\s*=\s*["\'](?:robotlink|botlink|ideoolink|ideoooolink|videoolink|norobotlink)["\'][^>]*>([^<]+)/i',
+    // Tier 3 : contenu statique des elements appats (botlink d'abord).
+    if (preg_match_all(
+        '/<(?:div|span)\b[^>]*\bid\s*=\s*["\']([A-Za-z0-9]*link)["\'][^>]*>([^<]+)/i',
         $html,
-        $m
+        $statics,
+        PREG_SET_ORDER
     )) {
-        $norm = normalizeDirectUrl(trim($m[1]), $embedUrl);
-        if ($norm !== null) {
-            return $norm;
+        usort($statics, static function (array $a, array $b) use ($rank): int {
+            return $rank($a[1]) <=> $rank($b[1]);
+        });
+        foreach ($statics as $st) {
+            $consider(trim($st[2]));
         }
     }
-    // Tier 4 : URL get_video brute
-    if (preg_match('~["\']?(//[^"\'\s<>]*get_vide[a-z0-9_]*\?[^"\'\s<>]*)~i', $html, $m)) {
-        $norm = normalizeDirectUrl($m[1], $embedUrl);
-        if ($norm !== null) {
-            return $norm;
+    // Tier 4 : URL get_video brute.
+    if (preg_match_all('~["\']?(//[^"\'\s<>]*get_vide[a-z0-9_]*\?[^"\'\s<>]*)~i', $html, $brutes)) {
+        foreach ($brutes[1] as $raw) {
+            $consider($raw);
         }
     }
-    return null;
+    if ($hostOk !== []) {
+        return $hostOk[0];
+    }
+    return $any[0] ?? null;
 }
 
 /** Titre de la video (og:title, sinon <title>). */
