@@ -316,6 +316,18 @@ PHP 8.0+ requis, extension `curl` activée.
 | `UQLOAD_CACHE_TTL` | `3600` | Durée du cache en secondes (`0` = désactivé) |
 | `UQLOAD_API_KEYS` | _(vide)_ | Clés API, une par ligne : `nom:cle[:limite_par_minute]`. Vide = accès libre |
 
+## Load balancer et tableau de bord
+
+- `lb/` : load balancer Caddy devant plusieurs copies du service,
+  **désactivé par défaut** — il s'active en définissant la variable
+  `BACKENDS` sur le service LB (nombre de backends au choix). Voir
+  `lb/README.md`.
+- `dashboard/` : tableau de bord web protégé par mot de passe — état des
+  services, tests d'extraction, et contrôle du load balancer (activer /
+  désactiver / choisir les backends) via l'API Railway. Voir
+  `dashboard/README.md`. Une version statique lecture seule est dans
+  `dashboard/statique/`.
+
 ## Notes
 
 - Le serveur intégré de PHP (`php -S`) est mono-thread : suffisant pour un usage

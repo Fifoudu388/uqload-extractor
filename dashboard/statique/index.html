@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extracteurs — Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0e1116; color: #e6e9ef; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  .sub { color: #9aa3b2; margin: 0 0 18px; }
+  section { background: #171b22; border: 1px solid #262c38; border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, select, button { font: inherit; color: inherit; background: #0e1116; border: 1px solid #333b48; border-radius: 8px; padding: 8px 10px; }
+  input, select { flex: 1 1 200px; min-width: 0; }
+  button { background: #2563eb; border-color: #2563eb; cursor: pointer; white-space: nowrap; }
+  button.ghost { background: transparent; border-color: #333b48; }
+  button:disabled { opacity: .5; cursor: default; }
+  .card { border: 1px solid #262c38; border-radius: 10px; padding: 12px; margin-top: 10px; }
+  .card .name { font-weight: 600; word-break: break-all; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+  .ok { background: #14532d; color: #86efac; }
+  .warn { background: #713f12; color: #fde68a; }
+  .bad { background: #7f1d1d; color: #fca5a5; }
+  .muted { color: #9aa3b2; font-size: 13px; }
+  .lat { color: #9aa3b2; font-size: 13px; margin-left: 6px; }
+  pre { background: #0e1116; border: 1px solid #262c38; border-radius: 8px; padding: 10px; overflow: auto; max-height: 320px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  label { display: block; font-size: 13px; color: #9aa3b2; margin: 10px 0 4px; }
+  .hint { font-size: 13px; color: #9aa3b2; margin: 8px 0 0; }
+  .del { background: transparent; border: none; color: #f87171; font-size: 18px; padding: 2px 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎬 Extracteurs — Dashboard</h1>
+  <p class="sub">Lecture seule : état des serveurs, état du load balancer, test des 4 extracteurs. Aucun réglage n'est modifié ici, et aucune clé ne quitte ton navigateur.</p>
+
+  <section>
+    <h2>Serveurs extracteurs</h2>
+    <div class="row">
+      <button id="refreshBtn">↻ Actualiser</button>
+      <span class="muted" id="autoNote">Actualisation auto toutes les 30 s.</span>
+    </div>
+    <div id="backends"></div>
+    <label for="newBackend">Ajouter un serveur (URL publique Railway, ex. https://extracteur-2.up.railway.app)</label>
+    <div class="row">
+      <input id="newBackend" type="url" placeholder="https://…up.railway.app">
+      <button id="addBackendBtn" class="ghost">Ajouter</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Load balancer</h2>
+    <label for="lbUrl">URL publique du service LB (vide tant qu'il n'est pas déployé)</label>
+    <div class="row">
+      <input id="lbUrl" type="url" placeholder="https://ton-lb.up.railway.app">
+      <button id="checkLbBtn" class="ghost">Vérifier</button>
+    </div>
+    <div id="lbStatus"><p class="muted">Renseigne l'URL du LB pour voir s'il est actif ou désactivé.</p></div>
+    <p class="hint">Le LB répond « Load balancer désactivé » tant que la variable BACKENDS est vide — c'est normal, c'est le réglage que tu as choisi.</p>
+  </section>
+
+  <section>
+    <h2>Tester un extracteur</h2>
+    <label for="testBackend">Serveur</label>
+    <select id="testBackend"></select>
+    <label for="testExtractor">Extracteur</label>
+    <select id="testExtractor">
+      <option value="uqload">uqload — /uqload.php</option>
+      <option value="vidmoly">vidmoly — /vidmoly.php</option>
+      <option value="streamtape">streamtape — /streamtape.php</option>
+      <option value="lulustream">lulustream — /lulustream.php</option>
+    </select>
+    <label for="testId">ID de la vidéo (ou URL complète avec ?url=… selon l'extracteur)</label>
+    <input id="testId" type="text" placeholder="ex. vidmoly : iztl71ko757x · streamtape : MkGWp47a8bUma4o">
+    <label for="apiKey">Clé API (facultative — seulement si UQLOAD_API_KEYS est défini sur le service)</label>
+    <input id="apiKey" type="password" placeholder="Clé API…" autocomplete="off">
+    <p class="hint">La clé est tapée ici, gardée dans ce navigateur uniquement (localStorage), et envoyée directement au serveur extracteur. Elle n'est jamais envoyée ailleurs.</p>
+    <div class="row" style="margin-top:10px">
+      <label style="margin:0; display:flex; gap:6px; align-items:center; color:#e6e9ef"><input type="checkbox" id="useProxy" checked style="flex:none"> via le proxy (&amp;proxy=1)</label>
+      <button id="testBtn">Tester</button>
+    </div>
+    <div id="testResult"></div>
+  </section>
+
+  <p class="muted">Niveau 2 (activer / couper le LB et choisir les backends depuis cette page) : il faudra un jeton Railway dans les variables du service LB — à décider séparément, ce dashboard ne touche à rien.</p>
+</main>
+<script>
+(function () {
+  "use strict";
+  var LS_BACKENDS = "extdash.backends";
+  var LS_LB = "extdash.lb";
+  var LS_KEY = "extdash.apikey";
+  var DEFAULT_BACKENDS = ["https://stream.visionary.qzz.io"];
+
+  function loadJSON(key, fallback) {
+    try { var v = JSON.parse(localStorage.getItem(key)); return v == null ? fallback : v; }
+    catch (e) { return fallback; }
+  }
+  function saveJSON(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {} }
+
+  var backends = loadJSON(LS_BACKENDS, DEFAULT_BACKENDS);
+  if (!Array.isArray(backends) || backends.length === 0) backends = DEFAULT_BACKENDS.slice();
+
+  var $ = function (id) { return document.getElementById(id); };
+  var backendsEl = $("backends"), lbUrlEl = $("lbUrl"), lbStatusEl = $("lbStatus"),
+      testBackendEl = $("testBackend"), testExtractorEl = $("testExtractor"),
+      testIdEl = $("testId"), apiKeyEl = $("apiKey"), useProxyEl = $("useProxy"),
+      testResultEl = $("testResult");
+
+  lbUrlEl.value = loadJSON(LS_LB, "");
+  apiKeyEl.value = loadJSON(LS_KEY, "");
+  apiKeyEl.addEventListener("change", function () { saveJSON(LS_KEY, apiKeyEl.value); });
+  lbUrlEl.addEventListener("change", function () { saveJSON(LS_LB, lbUrlEl.value.trim()); checkLb(); });
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+
+  function renderBackends() {
+    backendsEl.innerHTML = "";
+    testBackendEl.innerHTML = "";
+    backends.forEach(function (url, i) {
+      var card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = '<span class="badge muted" data-role="badge">…</span><span class="lat" data-role="lat"></span>' +
+        '<div class="name">' + esc(url) + '</div>' +
+        '<div class="muted" data-role="detail"></div>';
+      var del = document.createElement("button");
+      del.className = "del"; del.textContent = "×"; del.title = "Retirer ce serveur";
+      del.addEventListener("click", function () {
+        backends.splice(i, 1); saveJSON(LS_BACKENDS, backends); renderBackends(); checkAll();
+      });
+      card.appendChild(del);
+      backendsEl.appendChild(card);
+      var opt = document.createElement("option");
+      opt.value = url; opt.textContent = url;
+      testBackendEl.appendChild(opt);
+    });
+  }
+
+  function checkOne(url, card) {
+    var badge = card.querySelector('[data-role="badge"]'),
+        lat = card.querySelector('[data-role="lat"]'),
+        detail = card.querySelector('[data-role="detail"]');
+    badge.className = "badge muted"; badge.textContent = "…";
+    lat.textContent = ""; detail.textContent = "";
+    var t0 = performance.now();
+    fetch(url.replace(/\/$/, "") + "/", { cache: "no-store" })
+      .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); })
+      .then(function (res) {
+        var ms = Math.round(performance.now() - t0);
+        lat.textContent = ms + " ms";
+        var online = false, note = "";
+        try { var j = JSON.parse(res.text); online = j.status === "online"; note = j.service || ""; }
+        catch (e) { note = res.text.slice(0, 120); }
+        if (res.status === 200 && online) {
+          badge.className = "badge ok"; badge.textContent = "En ligne";
+        } else if (res.status === 200) {
+          badge.className = "badge warn"; badge.textContent = "Répond (inattendu)";
+        } else {
+          badge.className = "badge bad"; badge.textContent = "HTTP " + res.status;
+        }
+        detail.textContent = note;
+      })
+      .catch(function (err) {
+        badge.className = "badge bad"; badge.textContent = "Hors ligne";
+        detail.textContent = String(err && err.message ? err.message : err);
+      });
+  }
+
+  function checkAll() {
+    var cards = backendsEl.querySelectorAll(".card");
+    backends.forEach(function (url, i) { if (cards[i]) checkOne(url, cards[i]); });
+  }
+
+  function checkLb() {
+    var url = lbUrlEl.value.trim();
+    saveJSON(LS_LB, url);
+    if (!url) { lbStatusEl.innerHTML = '<p class="muted">Renseigne l\u2019URL du LB pour voir s\u2019il est actif ou désactivé.</p>'; return; }
+    lbStatusEl.innerHTML = '<p class="muted">Vérification…</p>';
+    var t0 = performance.now();
+    fetch(url.replace(/\/$/, "") + "/", { cache: "no-store" })
+      .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); })
+      .then(function (res) {
+        var ms = Math.round(performance.now() - t0);
+        if (res.text.indexOf("désactiv") !== -1 || res.text.indexOf("desactive") !== -1) {
+          lbStatusEl.innerHTML = '<div class="card"><span class="badge warn">Désactivé</span><span class="lat">' + ms + ' ms</span><div class="muted">Le LB répond mais ne relaie rien : BACKENDS est vide. Pour l\u2019activer, définis BACKENDS sur le service LB puis redémarre-le.</div></div>';
+        } else {
+          var online = false;
+          try { online = JSON.parse(res.text).status === "online"; } catch (e) {}
+          if (res.status === 200 && online) {
+            lbStatusEl.innerHTML = '<div class="card"><span class="badge ok">Actif</span><span class="lat">' + ms + ' ms</span><div class="muted">Le LB répond comme un extracteur : il relaie vers ses backends.</div></div>';
+          } else {
+            lbStatusEl.innerHTML = '<div class="card"><span class="badge warn">Répond (HTTP ' + res.status + ')</span><span class="lat">' + ms + ' ms</span><div class="muted">' + esc(res.text.slice(0, 200)) + '</div></div>';
+          }
+        }
+      })
+      .catch(function (err) {
+        lbStatusEl.innerHTML = '<div class="card"><span class="badge bad">Hors ligne</span><div class="muted">' + esc(String(err && err.message ? err.message : err)) + '</div></div>';
+      });
+  }
+
+  $("testBtn").addEventListener("click", function () {
+    var base = testBackendEl.value.replace(/\/$/, "");
+    var ext = testExtractorEl.value;
+    var id = testIdEl.value.trim();
+    if (!base) { testResultEl.innerHTML = '<p class="muted">Ajoute d\u2019abord un serveur.</p>'; return; }
+    if (!id) { testResultEl.innerHTML = '<p class="muted">Colle un ID de vidéo à tester.</p>'; return; }
+    var u = base + "/" + ext + ".php?id=" + encodeURIComponent(id);
+    if (useProxyEl.checked) u += "&proxy=1";
+    var key = apiKeyEl.value.trim();
+    if (key) u += "&key=" + encodeURIComponent(key);
+    testResultEl.innerHTML = '<p class="muted">Test en cours…</p>';
+    var t0 = performance.now();
+    fetch(u, { cache: "no-store" })
+      .then(function (r) { return r.text().then(function (t) { return { status: r.status, text: t }; }); })
+      .then(function (res) {
+        var ms = Math.round(performance.now() - t0);
+        var badge = res.status === 200 ? "ok" : "bad";
+        var body = res.text;
+        try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) {}
+        if (body.length > 3000) body = body.slice(0, 3000) + "\n… (tronqué)";
+        testResultEl.innerHTML = '<div class="card"><span class="badge ' + badge + '">HTTP ' + res.status + '</span><span class="lat">' + ms + ' ms</span><pre>' + esc(body) + '</pre></div>';
+      })
+      .catch(function (err) {
+        testResultEl.innerHTML = '<div class="card"><span class="badge bad">Erreur réseau</span><div class="muted">' + esc(String(err && err.message ? err.message : err)) + '</div></div>';
+      });
+  });
+
+  $("refreshBtn").addEventListener("click", function () { checkAll(); checkLb(); });
+  $("checkLbBtn").addEventListener("click", checkLb);
+  $("addBackendBtn").addEventListener("click", function () {
+    var url = $("newBackend").value.trim().replace(/\/$/, "");
+    if (!/^https?:\/\//.test(url)) { $("newBackend").focus(); return; }
+    if (backends.indexOf(url) === -1) backends.push(url);
+    saveJSON(LS_BACKENDS, backends);
+    $("newBackend").value = "";
+    renderBackends(); checkAll();
+  });
+
+  renderBackends();
+  checkAll();
+  checkLb();
+  setInterval(function () { checkAll(); checkLb(); }, 30000);
+})();
+</script>
+</body>
+</html>
