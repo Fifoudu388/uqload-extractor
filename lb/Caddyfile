@@ -1,7 +1,10 @@
 # Load balancer des extracteurs (uqload / vidmoly / streamtape / lulustream)
 # ---------------------------------------------------------------------------
-# 3 backends Railway (le meme code, 3 services). Caddy repartit les requetes
-# et sort de la rotation tout backend qui ne repond plus (health checks).
+# MODELE de configuration : ce fichier n'est pas utilise tel quel.
+# Au demarrage, entrypoint.sh remplace %%UPSTREAMS%% par la liste des
+# backends definie dans la variable BACKENDS (voir README.md), puis lance
+# Caddy avec le fichier genere. Si BACKENDS est vide, le load balancer est
+# desactive et ce modele n'est pas utilise du tout.
 #
 # Pourquoi des sessions collantes (cookie) et pas du simple round-robin ?
 # Le lien get_video est lie a l'IP du serveur qui l'a genere : la requete
@@ -9,18 +12,12 @@
 # arriver sur le MEME backend, sinon le CDN repond 403 "unauthorized
 # request". Caddy pose un cookie `lb` a la premiere reponse ; le navigateur
 # le renvoie ensuite, et reste donc sur le meme backend.
-# (Si un jour les 3 services partagent la meme IP de sortie, on pourra
+# (Si un jour les services partagent la meme IP de sortie, on pourra
 # passer a `lb_policy least_conn` — le backend avec le moins de requetes
 # en cours — sans cookie. Voir README.md.)
-#
-# Variables d'environnement (a definir sur le service Caddy dans Railway) :
-#   PORT          : injecte par Railway — ne pas definir a la main
-#   BACKEND_1/2/3 : URL publique de chaque service extracteur,
-#                   ex : https://extracteur-1.up.railway.app
-#                   (sans chemin, sans / final)
 
 :{$PORT} {
-	reverse_proxy {$BACKEND_1} {$BACKEND_2} {$BACKEND_3} {
+	reverse_proxy %%UPSTREAMS%% {
 		# Sessions collantes par cookie (voir commentaire en tete).
 		lb_policy cookie lb
 
