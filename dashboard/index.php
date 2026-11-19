@@ -12,6 +12,9 @@
  *   RAILWAY_API_TOKEN, RAILWAY_TOKEN_TYPE (project|account),
  *   RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT_ID, LB_SERVICE_ID
  *                       (controle du load balancer ; sans eux, etat seul)
+ *   EXTRACTOR_SERVICE_IDS  identifiants Railway des services extracteurs,
+ *                       dans le meme ordre que EXTRACTOR_URLS : ils servent
+ *                       a activer / desactiver un extracteur partout
  */
 
 require __DIR__ . '/lib/railway.php';
@@ -35,6 +38,7 @@ $PASSWORD = (string) (getenv('DASHBOARD_PASSWORD') ?: '');
 $POOL = envList('EXTRACTOR_URLS');
 $PUBLIC_URL = trim((string) (getenv('PUBLIC_URL') ?: ''));
 $API_KEY = (string) (getenv('EXTRACTOR_API_KEY') ?: '');
+$EXTRACTOR_SERVICES = envList('EXTRACTOR_SERVICE_IDS');
 
 // --- Sans mot de passe configure, on n'affiche que la marche a suivre. ---
 if ($PASSWORD === '') {
@@ -66,7 +70,7 @@ unset($_SESSION['flash']);
 
 $railway = RailwayClient::fromEnv();
 
-$collectStatus = function () use ($railway, $POOL, $PUBLIC_URL) {
+$collectStatus = function () use ($railway, $POOL, $PUBLIC_URL, $EXTRACTOR_SERVICES) {
     $backends = [];
     foreach ($POOL as $url) {
         $backends[] = checkBackend($url);
@@ -80,7 +84,19 @@ $collectStatus = function () use ($railway, $POOL, $PUBLIC_URL) {
             $lbError = $ex->getMessage();
         }
     }
+    $disabled = null;
+    $disabledError = null;
+    if ($railway !== null && $EXTRACTOR_SERVICES !== []) {
+        try {
+            $disabled = $railway->getDisabledExtractors($EXTRACTOR_SERVICES);
+        } catch (Throwable $ex) {
+            $disabledError = $ex->getMessage();
+        }
+    }
     return [
+        'disabled' => $disabled,
+        'disabled_error' => $disabledError,
+        'extractor_control' => $railway !== null && $EXTRACTOR_SERVICES !== [],
         'checked_at' => date('H:i:s'),
         'public' => checkPublic($PUBLIC_URL),
         'public_url' => $PUBLIC_URL,
@@ -121,6 +137,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($action === 'disable') {
             $railway->disable();
             $_SESSION['flash'] = ['ok', 'Load balancer desactive. Redeploiement en cours, environ une minute.'];
+        } elseif ($action === 'toggle_extractor') {
+            $name = (string) ($_POST['name'] ?? '');
+            if (!in_array($name, EXTRACTOR_NAMES_ALL, true)) {
+                throw new Exception('Extracteur inconnu.');
+            }
+            if ($EXTRACTOR_SERVICES === []) {
+                throw new Exception('EXTRACTOR_SERVICE_IDS non configure : impossible de piloter les serveurs extracteurs.');
+            }
+            $current = $railway->getDisabledExtractors($EXTRACTOR_SERVICES);
+            if (in_array($name, $current, true)) {
+                $new = array_values(array_diff($current, [$name]));
+                $verb = 'reactive';
+            } else {
+                $new = array_merge($current, [$name]);
+                $verb = 'desactive';
+            }
+            $railway->setDisabledExtractors($EXTRACTOR_SERVICES, $new);
+            $_SESSION['flash'] = ['ok', 'Extracteur ' . $name . ' ' . $verb . ' sur '
+                . count($EXTRACTOR_SERVICES) . ' serveur(s). Redeploiement en cours, effet d\'ici environ une minute.'];
         } elseif ($action === 'test') {
             $base = $PUBLIC_URL !== '' ? $PUBLIC_URL : ($POOL[0] ?? '');
             if ($base === '') {
@@ -282,6 +317,39 @@ $lbBackends = $status['lb']['backends'] ?? [];
           </tr>
         <?php endforeach; ?>
       </table>
+    <?php endif; ?>
+  </section>
+
+  <section>
+    <h2>Extracteurs (activation)</h2>
+    <?php if (!$status['extractor_control']): ?>
+      <p><span class="badge off">Controle par extracteur non configure</span></p>
+      <p class="muted">Pour activer ou couper un extracteur d'ici, ajoute <code>EXTRACTOR_SERVICE_IDS</code>
+      aux variables de ce service : les identifiants Railway de tes services extracteurs, dans le meme
+      ordre que <code>EXTRACTOR_URLS</code>. Voir le README du dashboard.</p>
+    <?php elseif ($status['disabled_error'] !== null): ?>
+      <p><span class="badge bad">Erreur API Railway</span></p>
+      <p class="muted"><?= e((string) $status['disabled_error']) ?></p>
+    <?php else: ?>
+      <table>
+        <?php foreach (EXTRACTOR_NAMES_ALL as $name): $off = in_array($name, $status['disabled'] ?? [], true); ?>
+          <tr>
+            <td><?= e($name) ?></td>
+            <td><span class="badge <?= $off ? 'bad' : 'ok' ?>"><?= $off ? 'Desactive' : 'Actif' ?></span></td>
+            <td>
+              <form method="post" style="margin:0">
+                <input type="hidden" name="csrf" value="<?= e($csrf) ?>">
+                <input type="hidden" name="action" value="toggle_extractor">
+                <input type="hidden" name="name" value="<?= e($name) ?>">
+                <button type="submit" class="<?= $off ? '' : 'danger' ?>"><?= $off ? 'Reactiver' : 'Desactiver' ?></button>
+              </form>
+            </td>
+          </tr>
+        <?php endforeach; ?>
+      </table>
+      <p class="muted">Un extracteur desactive repond a tout appel par une erreur <strong>HTTP 503</strong>
+      (<code>extracteur_desactive</code>) avec un message explicite. La bascule pose la variable
+      <code>DISABLED_EXTRACTORS</code> sur chaque serveur puis le redeploie : effet d'ici environ une minute.</p>
     <?php endif; ?>
   </section>
 

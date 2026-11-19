@@ -12,6 +12,10 @@
  * Jeton : un jeton de PROJET (en-tete Project-Access-Token, defaut) ou un
  * jeton de COMPTE (en-tete Authorization: Bearer) — variable
  * RAILWAY_TOKEN_TYPE = project | account.
+ *
+ * Le service cible par defaut est le load balancer (LB_SERVICE_ID) ; les
+ * methodes acceptent un autre serviceId pour piloter les services
+ * extracteurs (activation / desactivation par extracteur).
  */
 
 final class RailwayException extends Exception
@@ -95,51 +99,55 @@ final class RailwayClient
         return is_array($data['data'] ?? null) ? $data['data'] : [];
     }
 
-    /** Variables du service LB, sous forme de tableau nom => valeur. */
-    public function getVariables(): array
+    /** Variables d'un service (par defaut le LB), sous forme de tableau nom => valeur. */
+    public function getVariables(?string $serviceId = null): array
     {
         $q = 'query($projectId: String!, $environmentId: String!, $serviceId: String) '
             . '{ variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId) }';
         $d = $this->graphql($q, [
             'projectId' => $this->projectId,
             'environmentId' => $this->environmentId,
-            'serviceId' => $this->serviceId,
+            'serviceId' => $serviceId ?? $this->serviceId,
         ]);
         return is_array($d['variables'] ?? null) ? $d['variables'] : [];
     }
 
-    public function upsert(string $name, string $value): void
+    public function upsert(string $name, string $value, ?string $serviceId = null): void
     {
         $q = 'mutation($input: VariableUpsertInput!) { variableUpsert(input: $input) }';
         $this->graphql($q, ['input' => [
             'projectId' => $this->projectId,
             'environmentId' => $this->environmentId,
-            'serviceId' => $this->serviceId,
+            'serviceId' => $serviceId ?? $this->serviceId,
             'name' => $name,
             'value' => $value,
         ]]);
     }
 
-    public function delete(string $name): void
+    public function delete(string $name, ?string $serviceId = null): void
     {
         $q = 'mutation($input: VariableDeleteInput!) { variableDelete(input: $input) }';
         $this->graphql($q, ['input' => [
             'projectId' => $this->projectId,
             'environmentId' => $this->environmentId,
-            'serviceId' => $this->serviceId,
+            'serviceId' => $serviceId ?? $this->serviceId,
             'name' => $name,
         ]]);
     }
 
-    public function redeploy(): void
+    public function redeploy(?string $serviceId = null): void
     {
         $q = 'mutation($environmentId: String!, $serviceId: String!) '
             . '{ serviceInstanceRedeploy(environmentId: $environmentId, serviceId: $serviceId) }';
         $this->graphql($q, [
             'environmentId' => $this->environmentId,
-            'serviceId' => $this->serviceId,
+            'serviceId' => $serviceId ?? $this->serviceId,
         ]);
     }
+
+    // ------------------------------------------------------------------
+    // Load balancer (service LB)
+    // ------------------------------------------------------------------
 
     /** Etat actuel du load balancer, lu depuis les variables du service LB. */
     public function lbState(): array
@@ -182,6 +190,64 @@ final class RailwayClient
         usleep(300000);
         $this->redeploy();
     }
+
+    // ------------------------------------------------------------------
+    // Extracteurs (activation / desactivation par extracteur)
+    // ------------------------------------------------------------------
+
+    /**
+     * Liste des extracteurs desactives, lue sur le premier service
+     * extracteur (le dashboard pose la meme valeur sur tous).
+     */
+    public function getDisabledExtractors(array $serviceIds): array
+    {
+        if ($serviceIds === []) {
+            return [];
+        }
+        $vars = $this->getVariables($serviceIds[0]);
+        return parseDisabledExtractors((string) ($vars['DISABLED_EXTRACTORS'] ?? ''));
+    }
+
+    /**
+     * Pose la liste des extracteurs desactives sur CHAQUE service
+     * extracteur (variable DISABLED_EXTRACTORS ; supprimee si la liste
+     * est vide), puis redeploie chaque service.
+     */
+    public function setDisabledExtractors(array $serviceIds, array $names): void
+    {
+        $names = array_values(array_intersect($names, EXTRACTOR_NAMES_ALL));
+        foreach ($serviceIds as $i => $sid) {
+            if ($i > 0) {
+                usleep(300000);
+            }
+            $vars = $this->getVariables($sid);
+            if ($names === []) {
+                if (array_key_exists('DISABLED_EXTRACTORS', $vars)) {
+                    $this->delete('DISABLED_EXTRACTORS', $sid);
+                }
+            } else {
+                $this->upsert('DISABLED_EXTRACTORS', implode(',', $names), $sid);
+            }
+            usleep(300000);
+            $this->redeploy($sid);
+        }
+    }
+}
+
+/** Les quatre extracteurs connus. */
+const EXTRACTOR_NAMES_ALL = ['uqload', 'vidmoly', 'streamtape', 'lulustream'];
+
+/** Parse la valeur de DISABLED_EXTRACTORS ("vidmoly, lulustream") en liste de noms valides. */
+function parseDisabledExtractors(string $raw): array
+{
+    $out = [];
+    foreach (explode(',', $raw) as $part) {
+        $part = trim($part);
+        if ($part !== '' && in_array($part, EXTRACTOR_NAMES_ALL, true)) {
+            $out[] = $part;
+        }
+    }
+    return $out;
 }
 
 /**

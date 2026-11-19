@@ -704,6 +704,20 @@ function checkRateLimit(array $keyCfg): array
 $input = $argv[1] ?? ($_GET['id'] ?? null);
 $url   = $argv[2] ?? ($_GET['url'] ?? null);
 
+// ---- Extracteur desactive depuis le tableau de bord ?
+// Variable DISABLED_EXTRACTORS (noms separes par des virgules, posee par le
+// dashboard sur le service) : tout appel web recoit une erreur 503 explicite.
+if (php_sapi_name() !== 'cli') {
+    $disabledList = array_filter(array_map('trim', explode(',', (string) getenv('DISABLED_EXTRACTORS'))));
+    if (in_array('vidmoly', $disabledList, true)) {
+        sendJson([
+            'error'   => 'extracteur_desactive',
+            'message' => "L'extracteur vidmoly est desactive pour le moment.",
+        ], 503);
+        exit;
+    }
+}
+
 // ---- Authentification par cle API (si des cles sont configurees, sauf en CLI)
 $apiKeys = parseApiKeys();
 $auth    = (php_sapi_name() === 'cli') ? ['open' => true] : findApiKey($apiKeys);

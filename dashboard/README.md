@@ -47,6 +47,11 @@ déployer ce service, ou en secours.
    - `EXTRACTOR_URLS` : les URL publiques de tes services extracteurs,
      séparées par des espaces — c'est la liste des serveurs que le
      dashboard surveille et que tu peux cocher pour le load balancer.
+   - `EXTRACTOR_SERVICE_IDS` : les identifiants Railway de ces mêmes
+     services extracteurs, séparés par des espaces, **dans le même ordre**
+     que `EXTRACTOR_URLS` (ils se lisent dans l'URL quand tu ouvres
+     chaque service : `.../service/<ID>`). Ils servent à activer /
+     désactiver un extracteur sur tous les serveurs.
    - `PUBLIC_URL` : `https://stream.visionary.qzz.io` (ton entrée
      publique).
    - `EXTRACTOR_API_KEY` (optionnel) : une des clés de `UQLOAD_API_KEYS`,
@@ -65,6 +70,11 @@ déployer ce service, ou en secours.
 - **Lancer les tests** : appelle `vidmoly.php`, `streamtape.php` et
   `lulustream.php` sur l'entrée publique avec les identifiants de test
   connus, et vérifie qu'un flux est trouvé.
+- **Désactiver / Réactiver un extracteur** (uqload, vidmoly, streamtape,
+  lulustream) : pose la variable `DISABLED_EXTRACTORS` sur chaque service
+  extracteur, puis redéploie chacun (~1 minute). Un extracteur désactivé
+  répond à tout appel par **HTTP 503** et un message explicite :
+  `{"error": "extracteur_desactive", "message": "L'extracteur lulustream est desactive pour le moment."}`
 
 ## Sécurité
 

@@ -323,10 +323,12 @@ PHP 8.0+ requis, extension `curl` activée.
   `BACKENDS` sur le service LB (nombre de backends au choix). Voir
   `lb/README.md`.
 - `dashboard/` : tableau de bord web protégé par mot de passe — état des
-  services, tests d'extraction, et contrôle du load balancer (activer /
-  désactiver / choisir les backends) via l'API Railway. Voir
-  `dashboard/README.md`. Une version statique lecture seule est dans
-  `dashboard/statique/`.
+  services, tests d'extraction, contrôle du load balancer (activer /
+  désactiver / choisir les backends) et activation / désactivation de
+  chaque extracteur (variable `DISABLED_EXTRACTORS` ; un extracteur
+  désactivé répond HTTP 503 avec un message explicite), via l'API
+  Railway. Voir `dashboard/README.md`. Une version statique lecture
+  seule est dans `dashboard/statique/`.
 
 ## Notes
 
