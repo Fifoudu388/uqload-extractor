@@ -268,6 +268,35 @@ curl "https://ton-app.up.railway.app/uqload.php?id=v80v3zz0vay2&key=sk_live_abc1
 - Pour révoquer une clé, retire sa ligne de la variable et redéploie
   (Railway redémarre le service quand une variable change).
 
+## Relais de flux signé (anti « open bar »)
+
+Le maillon faible d'un extracteur protégé par clé, c'est le relais
+`?stream=` : le lecteur du navigateur ne peut pas garder une clé API secrète,
+et sans protection n'importe qui peut faire relayer n'importe quel flux
+d'hébergeur autorisé par ton serveur, sans limite de durée — ta bande
+passante, ton IP.
+
+Le module partagé `signing.php` applique donc le même principe que le proxy
+signé de Movix (HMAC) : définis la variable `STREAM_SIGNING_SECRET`
+(`openssl rand -hex 32` pour la générer). Dès lors, quand une extraction
+authentifiée demande `?proxy=1`, toutes les URLs de flux émises — réponse
+JSON, playlists réécrites, segments — portent `&exp=<expiration>&sig=<HMAC>` :
+
+- la signature couvre l'extracteur, l'URL exacte du flux, le paramètre
+  d'origine `&o=` (streamtape/lulustream) et la date d'expiration
+  (`STREAM_SIGNATURE_TTL`, 12 h par défaut) ;
+- le relais accepte un appel signé **sans clé API** : la signature vaut
+  autorisation, et ces lectures ne consomment pas le quota de la clé ;
+- signature présente mais fausse, modifiée ou expirée : `403`, jamais de
+  repli silencieux ; une URL signée pour `uqload.php` ne peut pas être
+  rejouée sur `vidmoly.php` ;
+- sans `exp`/`sig`, l'ancien comportement reste : la clé API est exigée
+  pour le relais comme pour l'extraction (si des clés sont configurées).
+
+Sans `STREAM_SIGNING_SECRET`, rien ne change (aucune signature émise).
+Pense à définir la **même** valeur sur tous les services qui partagent ces
+extracteurs : la signature est vérifiée par le service qui relaie.
+
 ## Améliorations par rapport à la v1
 
 - **dePacker corrigé** : la base 62 est supportée (`base_convert()` plafonnait à 36,
@@ -315,6 +344,8 @@ PHP 8.0+ requis, extension `curl` activée.
 |---|---|---|
 | `UQLOAD_CACHE_TTL` | `3600` | Durée du cache en secondes (`0` = désactivé) |
 | `UQLOAD_API_KEYS` | _(vide)_ | Clés API, une par ligne : `nom:cle[:limite_par_minute]`. Vide = accès libre |
+| `STREAM_SIGNING_SECRET` | _(vide)_ | Secret HMAC des URLs de relais signées (voir « Relais de flux signé »). Vide = signature désactivée |
+| `STREAM_SIGNATURE_TTL` | `43200` | Durée de vie d'une URL de flux signée, en secondes |
 
 ## Load balancer et tableau de bord
 

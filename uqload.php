@@ -41,6 +41,17 @@
  */
 declare(strict_types=1);
 
+// Signature des URLs du relais ?stream= (module partage signing.php, meme
+// dossier) : voir signing.php pour le principe. Absent = repli silencieux
+// sur l'ancien comportement (relais protege par la seule cle API).
+if (file_exists(__DIR__ . '/signing.php')) {
+    require_once __DIR__ . '/signing.php';
+}
+if (!function_exists('streamSignatureQuery')) {
+    function streamSignatureQuery(string $route, string $target, string $extra = ''): string { return ''; }
+    function verifyStreamSignature(string $route, string $target, string $extra, mixed $expRaw, mixed $sigRaw): bool { return false; }
+}
+
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
@@ -214,7 +225,10 @@ function proxyUrl(string $target): string
     }
     $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
     $script = $_SERVER['SCRIPT_NAME'] ?? '/uqload.php';
-    return "{$proto}://{$host}{$script}?stream=" . rawurlencode($target);
+    $url    = "{$proto}://{$host}{$script}?stream=" . rawurlencode($target);
+    // Signature HMAC (si activee) : le lecteur n'aura pas besoin de la cle API.
+    $url .= streamSignatureQuery(basename(__FILE__, '.php'), $target);
+    return $url;
 }
 
 /**
@@ -622,8 +636,25 @@ if (php_sapi_name() !== 'cli') {
 }
 
 // ---- Authentification par cle API (si des cles sont configurees, sauf en CLI)
+// Exception : un appel au relais ?stream= porteur d'une signature valide
+// (exp + sig, emise par une extraction authentifiee) n'a pas besoin de la
+// cle : la signature vaut autorisation, pour cette URL exacte, cet
+// extracteur et jusqu'a expiration — et ne consomme pas le quota de la cle.
+// Une signature presente mais invalide ou expiree est rejetee (403),
+// jamais ignoree en silence.
+$streamTarget = $_GET['stream'] ?? null;
+$signedStream = false;
+if (php_sapi_name() !== 'cli' && is_string($streamTarget) && $streamTarget !== ''
+    && (isset($_GET['exp']) || isset($_GET['sig']))) {
+    $sigExtra = is_string($_GET['o'] ?? null) ? (string) $_GET['o'] : '';
+    if (!verifyStreamSignature(basename(__FILE__, '.php'), $streamTarget, $sigExtra, $_GET['exp'] ?? null, $_GET['sig'] ?? null)) {
+        sendJson(['error' => 'signature de flux invalide ou expiree'], 403);
+        exit;
+    }
+    $signedStream = true;
+}
 $apiKeys = parseApiKeys();
-$auth    = (php_sapi_name() === 'cli') ? ['open' => true] : findApiKey($apiKeys);
+$auth    = (php_sapi_name() === 'cli') ? ['open' => true] : ($signedStream ? ['open' => true, 'signed' => true] : findApiKey($apiKeys));
 if ($apiKeys !== [] && $auth === null) {
     sendJson(['error' => 'API key manquante ou invalide (header X-API-Key ou ?key=)'], 401);
     exit;
